@@ -18,9 +18,13 @@ import Sidebar from "@/app/components/Sidebar";
 
 interface Stock {
   id: string;
+  sizeId: string;
   sizeName: string;
-  varieties: string[];
-  quantity: number;
+  combinations: Array<{
+    varieties: string[];
+    quantity: number;
+  }>;
+  totalQuantity: number;
   price: number;
 }
 
@@ -28,10 +32,14 @@ interface SelectedProduct {
   id: string;
   size: string;
   varieties: string[];
-  selectedVariety: string;
+  selectedVarieties: string[];
   quantity: number;
   price: number;
   stockQuantity: number;
+  combinations: Array<{
+    varieties: string[];
+    quantity: number;
+  }>;
 }
 
 interface OrderItem {
@@ -89,15 +97,18 @@ export default function WalkInOrders() {
     try {
       const stocksSnapshot = await getDocs(collection(db, "stocks"));
       const stocksList = stocksSnapshot.docs
-        .map(doc => ({
-          ...doc.data(),
-          id: doc.id,
-          sizeName: doc.data().sizeName || "",
-          varieties: doc.data().varieties || [],
-          quantity: doc.data().quantity || 0,
-          price: doc.data().price || 0
-        }))
-        .filter(stock => stock.quantity > 0) as Stock[];
+        .map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            sizeId: data.sizeId || "",
+            sizeName: data.sizeName || "",
+            combinations: data.combinations || [],
+            totalQuantity: data.totalQuantity || 0,
+            price: data.price || 0
+          };
+        })
+        .filter(stock => stock.totalQuantity > 0) as Stock[];
       
       setStocks(stocksList);
     } catch (error) {
@@ -148,15 +159,30 @@ export default function WalkInOrders() {
   };
 
   const handleAddProduct = (stock: Stock) => {
+    const allVarieties = stock.combinations.reduce((acc, combo) => {
+      combo.varieties.forEach(variety => {
+        if (!acc.includes(variety)) {
+          acc.push(variety);
+        }
+      });
+      return acc;
+    }, [] as string[]);
+
     const selectedProduct: SelectedProduct = {
       id: stock.id,
       size: stock.sizeName,
-      varieties: stock.varieties,
-      selectedVariety: stock.varieties[0] || "",
+      varieties: allVarieties,
+      selectedVarieties: [],
       quantity: 1,
       price: stock.price,
-      stockQuantity: stock.quantity
+      stockQuantity: stock.totalQuantity,
+      combinations: stock.combinations
     };
+
+    if (stock.sizeName !== "Tray" && stock.sizeName !== "Big Bilao") {
+      selectedProduct.selectedVarieties = [allVarieties[0]];
+    }
+
     setSelectedProducts([...selectedProducts, selectedProduct]);
     setTotalAmount(prev => prev + stock.price);
   };
@@ -186,11 +212,18 @@ export default function WalkInOrders() {
     }
   };
 
-  const handleVarietyChange = (index: number, variety: string) => {
+  const handleVarietyChange = (index: number, selectedOptions: string[]) => {
     const updatedProducts = [...selectedProducts];
+    const product = updatedProducts[index];
+    
+    if ((product.size === "Tray" || product.size === "Big Bilao") && selectedOptions.length > 4) {
+      alert("Maximum of 4 varieties allowed for Tray and Big Bilao");
+      return;
+    }
+
     updatedProducts[index] = {
-      ...updatedProducts[index],
-      selectedVariety: variety
+      ...product,
+      selectedVarieties: selectedOptions
     };
     setSelectedProducts(updatedProducts);
   };
@@ -223,7 +256,6 @@ export default function WalkInOrders() {
 
     try {
       await runTransaction(db, async (transaction: Transaction) => {
-        // First, perform all reads
         const stockReads = selectedProducts.map(async (product) => {
           const stockRef = doc(db, "stocks", product.id);
           const stockDoc = await transaction.get(stockRef);
@@ -232,7 +264,7 @@ export default function WalkInOrders() {
             throw new Error(`Stock not found for ${product.size}`);
           }
 
-          const currentStock = stockDoc.data().quantity;
+          const currentStock = stockDoc.data().totalQuantity;
           if (currentStock < product.quantity) {
             throw new Error(`Insufficient stock for ${product.size}`);
           }
@@ -246,7 +278,6 @@ export default function WalkInOrders() {
 
         const stockData = await Promise.all(stockReads);
 
-        // Create order document
         const orderRef = collection(db, "orders");
         const now = new Date().toISOString();
         
@@ -272,24 +303,20 @@ export default function WalkInOrders() {
           items: selectedProducts.map(p => ({
             cartId: p.id,
             productSize: p.size,
-            productVarieties: [p.selectedVariety],
+            productVarieties: p.selectedVarieties,
             productQuantity: p.quantity,
             productPrice: p.price
           }))
         };
 
-        // Add the order
         const orderDoc = await addDoc(orderRef, newOrder);
 
-        // Now perform all writes for stock updates
         stockData.forEach(({ ref, currentStock, product }) => {
-          // Update stock quantity
           transaction.update(ref, {
-            quantity: currentStock - product.quantity,
+            totalQuantity: currentStock - product.quantity,
             lastUpdated: serverTimestamp()
           });
 
-          // Add stock history entry
           const historyRef = doc(collection(db, "stockHistory"));
           transaction.set(historyRef, {
             stockId: product.id,
@@ -304,7 +331,6 @@ export default function WalkInOrders() {
           });
         });
 
-        // Add to sales record if payment is cash
         if (paymentMethod === "Cash") {
           const salesRef = collection(db, "sales");
           const saleData = {
@@ -315,7 +341,7 @@ export default function WalkInOrders() {
             date: serverTimestamp(),
             items: selectedProducts.map(p => ({
               productSize: p.size,
-              productVariety: p.selectedVariety,
+              productVariety: p.selectedVarieties.join(", "),
               productQuantity: p.quantity,
               productPrice: p.price
             })),
@@ -326,14 +352,12 @@ export default function WalkInOrders() {
         }
       });
 
-      // Reset form
       setSelectedProducts([]);
       setTotalAmount(0);
       setCustomerName("");
       setPaymentMethod("Cash");
       setGcashReference("");
       
-      // Refresh data
       fetchWalkInOrders();
       fetchStocks();
       
@@ -357,7 +381,6 @@ export default function WalkInOrders() {
         <div className="flex-grow p-6">
           <h1 className="text-3xl font-bold text-gray-800 mb-6">Walk-in Orders</h1>
           
-          {/* Order Form */}
           <div className="bg-white p-6 rounded-lg shadow-md mb-6">
             <h2 className="text-xl font-semibold mb-4">Create New Order</h2>
             <form onSubmit={handleSubmit} className="space-y-4">
@@ -408,14 +431,20 @@ export default function WalkInOrders() {
                       <div key={stock.id} className="flex items-center justify-between p-3 bg-gray-50 rounded border">
                         <div className="flex-1">
                           <span className="block font-medium">{stock.sizeName}</span>
-                          <span className="text-sm text-gray-600">Varieties: {stock.varieties?.join(", ") || "No varieties"}</span>
-                          <span className="block text-sm text-gray-500">Stock Available: {stock.quantity}</span>
+                          <div className="text-sm text-gray-600">
+                            {stock.combinations.map((combo, idx) => (
+                              <div key={idx} className="mb-1">
+                                <span>Varieties: {combo.varieties.join(", ")}</span>
+                                <span className="ml-2 text-gray-500">(Stock: {combo.quantity})</span>
+                              </div>
+                            ))}
+                          </div>
                           <span className="block text-sm font-medium text-blue-600">Price: ₱{stock.price.toLocaleString()}</span>
                         </div>
                         <button
                           type="button"
                           onClick={() => handleAddProduct(stock)}
-                          disabled={selectedProducts.filter(p => p.id === stock.id).length >= stock.quantity}
+                          disabled={stock.totalQuantity === 0}
                           className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed ml-4"
                         >
                           Add
@@ -448,18 +477,49 @@ export default function WalkInOrders() {
                       
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700">Variety</label>
-                          <select
-                            value={product.selectedVariety}
-                            onChange={(e) => handleVarietyChange(index, e.target.value)}
-                            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                          >
-                            {product.varieties.map((variety) => (
-                              <option key={variety} value={variety}>
-                                {variety}
-                              </option>
-                            ))}
-                          </select>
+                          <label className="block text-sm font-medium text-gray-700">
+                            {product.size === "Tray" || product.size === "Big Bilao" 
+                              ? `Varieties (Select up to 4)` 
+                              : "Variety"}
+                          </label>
+                          {product.size === "Tray" || product.size === "Big Bilao" ? (
+                            <div className="mt-2 space-y-2">
+                              {product.varieties.map((variety) => (
+                                <label key={variety} className="flex items-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={product.selectedVarieties.includes(variety)}
+                                    onChange={(e) => {
+                                      const newSelected = e.target.checked
+                                        ? [...product.selectedVarieties, variety]
+                                        : product.selectedVarieties.filter(v => v !== variety);
+                                      handleVarietyChange(index, newSelected);
+                                    }}
+                                    className="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                                  />
+                                  <span className="ml-2 text-sm text-gray-700">{variety}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : (
+                            <select
+                              value={product.selectedVarieties[0] || ""}
+                              onChange={(e) => handleVarietyChange(index, [e.target.value])}
+                              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                            >
+                              {product.varieties.map((variety) => (
+                                <option key={variety} value={variety}>
+                                  {variety}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          {(product.size === "Tray" || product.size === "Big Bilao") && 
+                            product.selectedVarieties.length === 0 && (
+                            <p className="mt-1 text-sm text-red-500">
+                              Please select at least one variety
+                            </p>
+                          )}
                         </div>
                         
                         <div>
@@ -514,7 +574,6 @@ export default function WalkInOrders() {
             </form>
           </div>
 
-          {/* Recent Orders */}
           <div className="bg-white p-6 rounded-lg shadow-md">
             <h2 className="text-xl font-semibold mb-4">Recent Walk-in Orders</h2>
             <div className="overflow-x-auto">

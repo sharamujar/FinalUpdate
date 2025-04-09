@@ -22,6 +22,20 @@ import {
 } from "firebase/firestore";
 import Sidebar from "@/app/components/Sidebar";
 
+interface VarietyCombination {
+  varieties: string[];
+  quantity: number;
+}
+
+interface StockData {
+  id: string;
+  sizeId: string;
+  sizeName: string;
+  combinations: VarietyCombination[];
+  totalQuantity: number;
+  lastUpdated: Date;
+}
+
 interface Order {
   id: string;
   userId?: string;
@@ -238,51 +252,125 @@ export default function TrackingOrders() {
         if (newStatus === "Ready for Pickup") {
           // For each item in the order
           for (const item of order.items) {
-            // Find the matching stock by size and varieties
+            // Find the matching stock
             const stocksRef = collection(db, "stocks");
-            const stockQuery = query(
-              stocksRef,
-              where("sizeName", "==", item.productSize),
-              where("varieties", "array-contains-any", item.productVarieties)
-            );
+            const stockSnapshot = await getDocs(stocksRef);
             
-            const stockSnapshot = await getDocs(stockQuery);
-            
-            if (stockSnapshot.empty) {
+            console.log('Looking for stock:', {
+              size: item.productSize,
+              varieties: item.productVarieties
+            });
+
+            // Find stock with matching size and varieties
+            const matchingStock = stockSnapshot.docs.find(doc => {
+              const stockData = doc.data();
+              console.log('Checking stock:', {
+                id: doc.id,
+                sizeName: stockData.sizeName,
+                combinations: stockData.combinations
+              });
+
+              // First check if size matches
+              if (stockData.sizeName !== item.productSize) {
+                return false;
+              }
+
+              // Then check combinations
+              return stockData.combinations.some(combo => {
+                // For Tray and Big Bilao, we need to check if the varieties match in any order
+                if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
+                  // Sort both arrays to compare regardless of order
+                  const sortedOrderVarieties = [...item.productVarieties].sort();
+                  const sortedComboVarieties = [...combo.varieties].sort();
+                  
+                  console.log('Comparing varieties:', {
+                    orderVarieties: sortedOrderVarieties,
+                    comboVarieties: sortedComboVarieties,
+                    matches: JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties)
+                  });
+
+                  return JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties);
+                }
+                
+                // For other sizes, just check if the variety exists in the combination
+                return item.productVarieties.every(v => combo.varieties.includes(v));
+              });
+            });
+
+            if (!matchingStock) {
+              console.error('No matching stock found. Available stocks:', 
+                stockSnapshot.docs.map(doc => ({
+                  id: doc.id,
+                  data: doc.data()
+                }))
+              );
               throw new Error(`No stock found for ${item.productSize} with varieties ${item.productVarieties.join(", ")}`);
             }
 
-            // Get the first matching stock
-            const stockDoc = stockSnapshot.docs[0];
-            const stockData = stockDoc.data();
+            const stockData = matchingStock.data() as StockData;
+            
+            // Find the matching combination
+            const matchingCombo = stockData.combinations.find(combo => {
+              if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
+                // Sort both arrays to compare regardless of order
+                const sortedOrderVarieties = [...item.productVarieties].sort();
+                const sortedComboVarieties = [...combo.varieties].sort();
+                return JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties);
+              }
+              return item.productVarieties.every(v => combo.varieties.includes(v));
+            });
 
-            // Check if there's enough stock
-            if (stockData.quantity < item.productQuantity) {
+            if (!matchingCombo || matchingCombo.quantity < item.productQuantity) {
               throw new Error(`Insufficient stock for ${item.productSize} with varieties ${item.productVarieties.join(", ")}`);
             }
 
-            // Update the stock quantity
-            const newQuantity = stockData.quantity - item.productQuantity;
-            
+            // Update the combinations array
+            const updatedCombinations = stockData.combinations.map(combo => {
+              if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
+                // Sort both arrays to compare regardless of order
+                const sortedOrderVarieties = [...item.productVarieties].sort();
+                const sortedComboVarieties = [...combo.varieties].sort();
+                if (JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties)) {
+                  return {
+                    ...combo,
+                    quantity: combo.quantity - item.productQuantity
+                  };
+                }
+              } else if (item.productVarieties.every(v => combo.varieties.includes(v))) {
+                return {
+                  ...combo,
+                  quantity: combo.quantity - item.productQuantity
+                };
+              }
+              return combo;
+            });
+
+            const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
+
             // Update stock document
-            transaction.update(stockDoc.ref, {
-              quantity: newQuantity,
+            transaction.update(matchingStock.ref, {
+              combinations: updatedCombinations,
+              totalQuantity: newTotalQuantity,
               lastUpdated: new Date()
             });
 
             // Add stock history entry
             const historyRef = doc(collection(db, "stockHistory"));
             transaction.set(historyRef, {
-              varieties: item.productVarieties,
-              sizeName: item.productSize,
+              sizeId: stockData.sizeId,
+              sizeName: stockData.sizeName,
+              combination: {
+                varieties: item.productVarieties,
+                quantity: item.productQuantity
+              },
               type: 'out',
               quantity: item.productQuantity,
-              previousStock: stockData.quantity,
-              currentStock: newQuantity,
+              previousQuantity: stockData.totalQuantity,
+              newQuantity: newTotalQuantity,
               date: new Date(),
-              updatedBy: "System",
+              updatedBy: "Order System",
               remarks: `Order ${orderId} ready for pickup`,
-              stockId: stockDoc.id,
+              stockId: matchingStock.id,
               isDeleted: false
             });
           }

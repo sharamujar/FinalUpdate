@@ -27,12 +27,94 @@ ChartJS.register(
   Legend
 );
 
+// Define available varieties
+const VARIETIES = [
+    'Bibingka',
+    'Sapin-Sapin',
+    'Kutsinta',
+    'Kalamay',
+    'Cassava'
+];
+
+// Define size configurations with specific rules
+const sizeConfigs: Size[] = [
+    {
+        id: '1',
+        name: 'Big Bilao',
+        price: 520.00,
+        maxVarieties: 4,
+        minVarieties: 1,
+        excludedVarieties: ['Cassava'],
+        description: 'Can have up to 4 varieties (no Cassava)'
+    },
+    {
+        id: '2',
+        name: 'Tray',
+        price: 420.00,
+        maxVarieties: 4,
+        minVarieties: 1,
+        description: 'Can have up to 4 varieties'
+    },
+    {
+        id: '3',
+        name: 'Small',
+        price: 280.00,
+        maxVarieties: 1,
+        minVarieties: 1,
+        allowedVarieties: ['Bibingka'],
+        description: 'Bibingka only'
+    },
+    {
+        id: '4',
+        name: 'Half Tray',
+        price: 240.00,
+        maxVarieties: 2,
+        minVarieties: 1,
+        description: 'Can have up to 2 varieties'
+    },
+    {
+        id: '5',
+        name: 'Solo',
+        price: 200.00,
+        maxVarieties: 1,
+        minVarieties: 1,
+        allowedVarieties: ['Bibingka'],
+        description: 'Bibingka only'
+    },
+    {
+        id: '6',
+        name: '1/4 Slice',
+        price: 120.00,
+        maxVarieties: 5,
+        minVarieties: 1,
+        boxPrice: 140.00,
+        description: 'Can have up to 5 varieties'
+    }
+];
+
+interface VarietyCombination {
+    varieties: string[];
+    quantity: number;
+}
+
+interface Size {
+    id: string;
+    name: string;
+    price: number;
+    maxVarieties: number;
+    minVarieties: number;
+    allowedVarieties?: string[];
+    excludedVarieties?: string[];
+    boxPrice?: number;
+    description: string;
+}
+
 interface Stock {
     id: string;
-    sizeId: string;       // Reference to the size document
-    sizeName: string;     // e.g., 'Big Bilao', 'Regular Tray'
-    varieties: string[];  // Array of varieties selected for this stock
-    quantity: number;
+    sizeId: string;
+    sizeName: string;
+    combinations: VarietyCombination[];
+    totalQuantity: number;
     minimumStock: number;
     reorderPoint: number;
     productionDate: string;
@@ -43,8 +125,9 @@ interface Stock {
 
 interface StockHistory {
     id: string;
-    varieties: string[];  // Change from variety to varieties array
-    sizeName: string;    // Changed from productName to sizeName
+    sizeId: string;
+    sizeName: string;
+    combination: VarietyCombination;
     type: 'in' | 'out' | 'adjustment' | 'deleted';
     quantity: number;
     previousQuantity: number;
@@ -67,42 +150,120 @@ interface ChartData {
   }[];
 }
 
-interface Size {
-    id: string;
-    name: string;          // e.g., "Big Bilao"
-    price: number;         // Price based on size
-    maxVarieties: number;  // Maximum number of varieties allowed
-    availableVarieties?: string[]; // Specific varieties allowed (if applicable)
-    boxPrice?: number;     // Additional price for box (optional)
+interface OrderDetails {
+    sizeId: string;
+    varieties: string[];
+    quantity: number;
+    orderId: string;
 }
 
-// Define available varieties
-// const VARIETIES = [ ... ];
+// Move the function outside and before the Stock component
+export const updateStockOnOrderStatus = async (
+    orderDetails: {
+        orderId: string;
+        sizeId: string;
+        varieties: string[];
+        quantity: number;
+    }
+) => {
+    try {
+        // 1. Find the stock with matching size and varieties
+        const stocksRef = collection(db, "stocks");
+        const stocksSnapshot = await getDocs(stocksRef);
+        const stocks = stocksSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as Stock[];
 
-const sizes: Size[] = [
-    { id: '1', name: 'Big Bilao', price: 520.00, maxVarieties: 4 },
-    { id: '2', name: 'Tray', price: 420.00, maxVarieties: 4 },
-    { id: '3', name: 'Small', price: 280.00, maxVarieties: 1, availableVarieties: ['Bibingka'] },
-    { id: '4', name: 'Half Tray', price: 240.00, maxVarieties: 2 },
-    { id: '5', name: 'Solo', price: 200.00, maxVarieties: 1, availableVarieties: ['Bibingka'] },
-    { id: '6', name: '1/4 Slice', price: 120.00, maxVarieties: 0, boxPrice: 140.00 } // No box price
-];
+        const matchingStock = stocks.find(stock => {
+            return stock.sizeId === orderDetails.sizeId &&
+                stock.combinations.some(combo => 
+                    orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+                    combo.varieties.length === orderDetails.varieties.length
+                );
+        });
+
+        if (!matchingStock) {
+            throw new Error('Stock not available for the requested combination');
+        }
+
+        // 2. Check if enough quantity is available
+        const matchingCombo = matchingStock.combinations.find(combo => 
+            orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+            combo.varieties.length === orderDetails.varieties.length
+        );
+
+        if (!matchingCombo || matchingCombo.quantity < orderDetails.quantity) {
+            throw new Error('Insufficient stock quantity');
+        }
+
+        // 3. Update stock quantities
+        const stockRef = doc(db, "stocks", matchingStock.id);
+        const updatedCombinations = matchingStock.combinations.map(combo => {
+            if (orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+                combo.varieties.length === orderDetails.varieties.length) {
+                return {
+                    ...combo,
+                    quantity: combo.quantity - orderDetails.quantity
+                };
+            }
+            return combo;
+        });
+
+        const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
+
+        // 4. Update stock in database
+        await updateDoc(stockRef, {
+            combinations: updatedCombinations,
+            totalQuantity: newTotalQuantity,
+            lastUpdated: new Date()
+        });
+
+        // 5. Record in stock history
+        await addDoc(collection(db, "stockHistory"), {
+            sizeId: orderDetails.sizeId,
+            sizeName: matchingStock.sizeName,
+            combination: {
+                varieties: orderDetails.varieties,
+                quantity: orderDetails.quantity
+            },
+            type: 'out',
+            quantity: orderDetails.quantity,
+            previousQuantity: matchingStock.totalQuantity,
+            newQuantity: newTotalQuantity,
+            date: new Date(),
+            updatedBy: "Order System",
+            remarks: `Order ready for pickup - Order ID: ${orderDetails.orderId}`,
+            stockId: matchingStock.id,
+            isDeleted: false
+        });
+
+        return {
+            success: true,
+            message: 'Stock updated successfully'
+        };
+
+    } catch (error) {
+        console.error('Error updating stock for order:', error);
+        throw error;
+    }
+};
 
 export default function Stock() {
     const [stocks, setStocks] = useState<Stock[]>([]);
     const [stockHistory, setStockHistory] = useState<StockHistory[]>([]);
     const [stock, setStock] = useState<Stock>({
         id: '',
-        sizeId: "",
-        sizeName: "",
-        varieties: [],
-        quantity: 0,
+        sizeId: '',
+        sizeName: '',
+        combinations: [],
+        totalQuantity: 0,
         minimumStock: 0,
         reorderPoint: 0,
-        productionDate: "",
-        expiryDate: "",
+        productionDate: '',
+        expiryDate: '',
         lastUpdated: new Date(),
-        remarks: ""
+        remarks: ''
     });
     const [editStockId, setEditStockId] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -121,7 +282,7 @@ export default function Stock() {
     const [filterCategory, setFilterCategory] = useState('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [showLowStock, setShowLowStock] = useState(false);
-    const [sizes, setSizes] = useState<Size[]>([]);
+    const [sizes, setSizes] = useState<Size[]>(sizeConfigs);
     const [selectedVarieties, setSelectedVarieties] = useState<string[]>([]);
     const [isAddSizeOrVarietyOpen, setIsAddSizeOrVarietyOpen] = useState(false);
     const [newSizeName, setNewSizeName] = useState('');
@@ -129,6 +290,10 @@ export default function Stock() {
     const [newSizeMaxVarieties, setNewSizeMaxVarieties] = useState('1');
     const [newVarietyName, setNewVarietyName] = useState('');
     const [varieties, setVarieties] = useState<{ id: string; name: string }[]>([]);
+    const [currentCombination, setCurrentCombination] = useState<VarietyCombination>({
+        varieties: [],
+        quantity: 0
+    });
 
     useEffect(() => {
         fetchSizes();
@@ -206,12 +371,12 @@ export default function Stock() {
     };
 
     const updateStockChart = (stockList: Stock[]) => {
-        const sortedStocks = [...stockList].sort((a, b) => b.quantity - a.quantity);
+        const sortedStocks = [...stockList].sort((a, b) => b.totalQuantity - a.totalQuantity);
         setStockChartData({
             labels: sortedStocks.map(s => s.sizeName),
             datasets: [{
                 label: 'Current Stock Level',
-                data: sortedStocks.map(s => s.quantity),
+                data: sortedStocks.map(s => s.totalQuantity),
                 borderColor: 'rgb(75, 192, 192)',
                 backgroundColor: 'rgba(75, 192, 192, 0.5)',
                 tension: 0.1
@@ -231,27 +396,29 @@ export default function Stock() {
 
     const handleSizeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const selectedSize = sizes.find(s => s.id === e.target.value);
-        
-        // Reset selected varieties when size changes
-        let autoSelectedVarieties: string[] = [];
+        if (!selectedSize) return;
 
-        if (selectedSize) {
-            if (selectedSize.name === 'Solo' || selectedSize.name === 'Small') {
-                // For Solo and Small, automatically select Bibingka
-                autoSelectedVarieties = ['Bibingka'];
-            }
-            // For Big Bilao, we don't auto-select any varieties
-            // but we'll handle the max limit in handleVarietyChange
-        }
-
+        // Reset combinations when size changes
         setStock(prev => ({
             ...prev,
-            sizeId: e.target.value,
-            sizeName: selectedSize?.name || '',
-            varieties: autoSelectedVarieties
+            sizeId: selectedSize.id,
+            sizeName: selectedSize.name,
+            combinations: [],
+            totalQuantity: 0
         }));
 
-        setSelectedVarieties(autoSelectedVarieties);
+        // For Solo and Small, automatically add Bibingka
+        if (selectedSize.name === 'Solo' || selectedSize.name === 'Small') {
+            setCurrentCombination({
+                varieties: ['Bibingka'],
+                quantity: 0
+            });
+        } else {
+            setCurrentCombination({
+                varieties: [],
+                quantity: 0
+            });
+        }
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -262,16 +429,21 @@ export default function Stock() {
             const selectedSize = sizes.find(s => s.id === stock.sizeId);
             
             if (!selectedSize) {
-                throw new Error("Selected size not found");
-            }
-
-            if (selectedVarieties.length === 0) {
-                alert("Please select at least one variety");
+                alert("Please select a size");
+                setLoading(false);
                 return;
             }
 
-            if (selectedVarieties.length > selectedSize.maxVarieties) {
-                alert(`You can only select up to ${selectedSize.maxVarieties} varieties.`);
+            if (stock.combinations.length === 0) {
+                alert("Please add at least one variety combination");
+                setLoading(false);
+                return;
+            }
+
+            // Validate total quantity
+            if (stock.totalQuantity <= 0) {
+                alert("Total quantity must be greater than 0");
+                setLoading(false);
                 return;
             }
 
@@ -279,6 +451,12 @@ export default function Stock() {
             const expiryDate = new Date(stock.expiryDate);
             const productionDate = new Date(stock.productionDate);
             const currentDate = new Date();
+
+            if (!stock.productionDate || !stock.expiryDate) {
+                alert("Please set both production and expiry dates");
+                setLoading(false);
+                return;
+            }
 
             if (expiryDate <= productionDate) {
                 alert("Expiry date must be after production date");
@@ -323,12 +501,13 @@ export default function Stock() {
                 await updateDoc(docRef, { id: docRef.id });
 
                 await addDoc(collection(db, "stockHistory"), {
-                    varieties: selectedVarieties,
+                    sizeId: selectedSize.id,
                     sizeName: selectedSize.name,
+                    combination: stock.combinations[0],
                     type: 'in',
-                    quantity: stock.quantity,
-                    previousStock: 0,
-                    currentStock: stock.quantity,
+                    quantity: stock.totalQuantity,
+                    previousQuantity: 0,
+                    newQuantity: stock.totalQuantity,
                     date: new Date(),
                     updatedBy: "Admin",
                     remarks: "Initial stock entry",
@@ -359,7 +538,7 @@ export default function Stock() {
                 return;
             }
 
-            const newQuantity = currentStock.quantity + adjustment;
+            const newQuantity = currentStock.totalQuantity + adjustment;
             if (newQuantity < 0) {
                 alert("Stock cannot be negative!");
                 return;
@@ -369,18 +548,19 @@ export default function Stock() {
             
             // Update the stock quantity
             await updateDoc(stockRef, {
-                quantity: newQuantity,
+                totalQuantity: newQuantity,
                 lastUpdated: timestamp
             });
 
-            // Record in history with stockId and varieties
+            // Record in history with stockId and combinations
             await addDoc(collection(db, "stockHistory"), {
-                varieties: currentStock.varieties, // Include varieties in the history
+                sizeId: currentStock.sizeId,
                 sizeName: currentStock.sizeName,
+                combination: currentStock.combinations[0],
                 type: adjustment > 0 ? 'in' : 'out',
                 quantity: Math.abs(adjustment),
-                previousStock: currentStock.quantity, // Set previous stock
-                currentStock: newQuantity, // Set current stock
+                previousQuantity: currentStock.totalQuantity,
+                newQuantity: newQuantity,
                 date: timestamp,
                 updatedBy: "Admin",
                 remarks: `Stock ${adjustment > 0 ? 'added' : 'removed'}: ${Math.abs(adjustment)} units`,
@@ -426,13 +606,16 @@ export default function Stock() {
             // Delete the stock
             await deleteDoc(stockRef);
 
-            // Record final deletion in history
+            // Record final deletion in history with safe combination handling
             await addDoc(collection(db, "stockHistory"), {
-                variety: currentStock.varieties[0],
+                sizeId: currentStock.sizeId,
                 sizeName: currentStock.sizeName,
+                combination: currentStock.combinations && currentStock.combinations.length > 0 
+                    ? currentStock.combinations[0] 
+                    : { varieties: [], quantity: 0 },
                 type: 'deleted',
-                quantity: currentStock.quantity,
-                previousQuantity: currentStock.quantity,
+                quantity: currentStock.totalQuantity,
+                previousQuantity: currentStock.totalQuantity,
                 newQuantity: 0,
                 date: new Date(),
                 updatedBy: "Admin",
@@ -456,26 +639,26 @@ export default function Stock() {
             // Refresh the stocks list and history
             await Promise.all([fetchStocks(), fetchStockHistory()]);
             
-                alert("Stock deleted successfully!");
-            } catch (error) {
-                console.error("Error deleting stock:", error);
-                alert("Failed to delete stock.");
+            alert("Stock deleted successfully!");
+        } catch (error) {
+            console.error("Error deleting stock:", error);
+            alert("Failed to delete stock.");
         }
     };
 
     const resetForm = () => {
         setStock({
             id: '',
-            sizeId: "",
-            sizeName: "",
-            varieties: [],
-            quantity: 0,
+            sizeId: '',
+            sizeName: '',
+            combinations: [],
+            totalQuantity: 0,
             minimumStock: 0,
             reorderPoint: 0,
-            productionDate: "",
-            expiryDate: "",
+            productionDate: '',
+            expiryDate: '',
             lastUpdated: new Date(),
-            remarks: ""
+            remarks: ''
         });
         setEditStockId(null);
         setSelectedVarieties([]);
@@ -485,10 +668,10 @@ export default function Stock() {
 
     const filteredStocks = stocks
         .filter(s => filterCategory === 'all' || s.sizeName === filterCategory)
-        .filter(s => showLowStock ? s.quantity <= s.minimumStock : true)
+        .filter(s => showLowStock ? s.totalQuantity <= s.minimumStock : true)
         .filter(s => 
             s.sizeName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            s.varieties?.some(v => v.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            s.combinations?.some(c => c.varieties.some(v => v.toLowerCase().includes(searchTerm.toLowerCase()))) ||
             ''
         );
 
@@ -506,33 +689,75 @@ export default function Stock() {
         },
     };
 
-    // Update the handleVarietyChange function to handle variety selection limits
-    const handleVarietyChange = (variety: string) => {
+    const handleVarietyChange = (selectedVarieties: string[]) => {
         const selectedSize = sizes.find(s => s.id === stock.sizeId);
-        const maxVarieties = selectedSize?.maxVarieties || 0;
+        if (!selectedSize) return;
 
-        // For Solo and Small sizes, only allow Bibingka
-        if ((selectedSize?.name === 'Solo' || selectedSize?.name === 'Small') && variety !== 'Bibingka') {
+        // Validate against size constraints
+        if (selectedVarieties.length > selectedSize.maxVarieties) {
+            alert(`${selectedSize.name} can only have up to ${selectedSize.maxVarieties} varieties`);
             return;
         }
 
-        // For Big Bilao, don't allow Cassava
-        if (selectedSize?.name === 'Big Bilao' && variety === 'Cassava') {
-            alert('Cassava is not available for Big Bilao size');
+        // Check for allowed varieties
+        if (selectedSize.allowedVarieties && 
+            selectedVarieties.some(v => !selectedSize.allowedVarieties?.includes(v))) {
+            alert(`Only ${selectedSize.allowedVarieties.join(', ')} allowed for ${selectedSize.name}`);
             return;
         }
 
-        // If variety is already selected, remove it
-        if (selectedVarieties.includes(variety)) {
-            setSelectedVarieties(prev => prev.filter(v => v !== variety));
-        } else {
-            // If under max limit, add the variety
-            if (selectedVarieties.length < maxVarieties) {
-                setSelectedVarieties(prev => [...prev, variety]);
-            } else {
-                alert(`You can only select up to ${maxVarieties} varieties.`);
-            }
+        // Check for excluded varieties
+        if (selectedSize.excludedVarieties && 
+            selectedVarieties.some(v => selectedSize.excludedVarieties?.includes(v))) {
+            alert(`${selectedSize.excludedVarieties.join(', ')} not allowed for ${selectedSize.name}`);
+            return;
         }
+
+        setCurrentCombination(prev => ({
+            ...prev,
+            varieties: selectedVarieties
+        }));
+    };
+
+    const handleAddCombination = () => {
+        if (currentCombination.varieties.length === 0) {
+            alert('Please select at least one variety');
+            return;
+        }
+
+        if (currentCombination.quantity <= 0) {
+            alert('Please enter a valid quantity');
+            return;
+        }
+
+        const selectedSize = sizes.find(s => s.id === stock.sizeId);
+        if (!selectedSize) return;
+
+        // Check if this combination would exceed maximum varieties
+        const existingVarieties = new Set(stock.combinations.flatMap(c => c.varieties));
+        const newVarieties = new Set([...existingVarieties, ...currentCombination.varieties]);
+        
+        if (newVarieties.size > selectedSize.maxVarieties) {
+            alert(`${selectedSize.name} can only have ${selectedSize.maxVarieties} different varieties in total`);
+            return;
+        }
+
+        setStock(prev => {
+            const newCombinations = [...prev.combinations, currentCombination];
+            const newTotalQuantity = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
+            
+            return {
+                ...prev,
+                combinations: newCombinations,
+                totalQuantity: newTotalQuantity
+            };
+        });
+
+        // Reset current combination
+        setCurrentCombination({
+            varieties: [],
+            quantity: 0
+        });
     };
 
     const handleAddSizeOrVariety = async (e: React.FormEvent) => {
@@ -612,386 +837,469 @@ export default function Stock() {
         return { status: 'Valid', className: 'bg-green-100 text-green-800' };
     };
 
+    const handleOrderPlacement = async (orderDetails: OrderDetails) => {
+        try {
+            // 1. Find the stock with matching size and varieties
+            const matchingStock = stocks.find(stock => {
+                return stock.sizeId === orderDetails.sizeId &&
+                    stock.combinations.some(combo => 
+                        orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+                        combo.varieties.length === orderDetails.varieties.length
+                    );
+            });
+
+            if (!matchingStock) {
+                throw new Error('Stock not available for the requested combination');
+            }
+
+            // 2. Check if enough quantity is available
+            const matchingCombo = matchingStock.combinations.find(combo => 
+                orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+                combo.varieties.length === orderDetails.varieties.length
+            );
+
+            if (!matchingCombo || matchingCombo.quantity < orderDetails.quantity) {
+                throw new Error('Insufficient stock quantity');
+            }
+
+            // 3. Calculate price
+            const size = sizes.find(s => s.id === orderDetails.sizeId);
+            if (!size) {
+                throw new Error('Invalid size selected');
+            }
+
+            const totalPrice = size.price * orderDetails.quantity;
+
+            // 4. Update stock quantities
+            const stockRef = doc(db, "stocks", matchingStock.id);
+            const updatedCombinations = matchingStock.combinations.map(combo => {
+                if (orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
+                    combo.varieties.length === orderDetails.varieties.length) {
+                    return {
+                        ...combo,
+                        quantity: combo.quantity - orderDetails.quantity
+                    };
+                }
+                return combo;
+            });
+
+            const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
+
+            // 5. Update stock in database
+            await updateDoc(stockRef, {
+                combinations: updatedCombinations,
+                totalQuantity: newTotalQuantity,
+                lastUpdated: new Date()
+            });
+
+            // 6. Record in stock history
+            await addDoc(collection(db, "stockHistory"), {
+                sizeId: orderDetails.sizeId,
+                sizeName: size.name,
+                combination: {
+                    varieties: orderDetails.varieties,
+                    quantity: orderDetails.quantity
+                },
+                type: 'out',
+                quantity: orderDetails.quantity,
+                previousQuantity: matchingStock.totalQuantity,
+                newQuantity: newTotalQuantity,
+                date: new Date(),
+                updatedBy: "Order System",
+                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
+                stockId: matchingStock.id,
+                isDeleted: false
+            });
+
+            // 7. Check if reorder point reached
+            if (newTotalQuantity <= matchingStock.reorderPoint) {
+                // TODO: Implement notification system
+                console.log(`Reorder point reached for ${size.name} with varieties: ${orderDetails.varieties.join(', ')}`);
+            }
+
+            // 8. Refresh stocks
+            await fetchStocks();
+
+            return {
+                success: true,
+                price: totalPrice,
+                message: 'Stock updated successfully'
+            };
+
+        } catch (error) {
+            console.error('Error processing order:', error);
+            throw error;
+        }
+    };
+
     return (
         <ProtectedRoute>
-            <div className="flex h-screen overflow-hidden">
-                {/* Sidebar will be rendered here by the layout */}
-                <div className="flex-1 overflow-y-auto bg-gray-100">
-                    <div className="p-6">
-                        <h1 className="text-3xl font-bold text-gray-800 mb-6">Stock Management</h1>
+            <div className="container mx-auto px-4 py-8">
+                <h1 className="text-2xl font-bold mb-6">Stock Management</h1>
+                
+                {/* Size Selection */}
+                <div className="mb-6 p-4 bg-white rounded shadow">
+                    <h2 className="text-xl font-semibold mb-4">Select Size</h2>
+                    <select
+                        className="w-full p-2 border rounded"
+                        value={stock.sizeId}
+                        onChange={handleSizeChange}
+                    >
+                        <option value="">Select a size...</option>
+                        {sizes.map(size => (
+                            <option key={size.id} value={size.id}>
+                                {size.name} - {size.description}
+                            </option>
+                        ))}
+                    </select>
+                </div>
 
-                        {/* Stock Chart */}
-                        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Stock Levels Overview</h2>
-                            <div className="h-[300px]">
-                                <Line options={chartOptions} data={stockChartData} />
-                            </div>
-                        </div>
-
-                        {/* Filters and Controls */}
-                        <div className="bg-white p-4 rounded-lg shadow-md mb-6 flex flex-wrap gap-4 items-center">
-                    <input
-                        type="text"
-                                placeholder="Search products or locations..."
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                                className="border p-2 rounded flex-1"
-                            />
-                            <label className="flex items-center gap-2">
-                                <input
-                                    type="checkbox"
-                                    checked={showLowStock}
-                                    onChange={(e) => setShowLowStock(e.target.checked)}
-                                />
-                                Show Low Stock Only
-                            </label>
-                        </div>
-
-                        {/* Updated Stock Form */}
-                        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
-                            <h2 className="text-xl font-semibold mb-4">{editStockId ? 'Edit Stock' : 'Add New Stock'}</h2>
-                            <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {/* Size Selection with Add New Button */}
-                                <div className="space-y-4">
-                                    <div className="flex items-end gap-2">
-                                        <div className="flex-1">
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">Size</label>
-                                            <select
-                                                name="sizeId"
-                                                value={stock.sizeId}
-                                                onChange={handleSizeChange}
-                                                className="border p-2 rounded w-full"
-                        required
-                                            >
-                                                <option value="">Select Size</option>
-                                                {sizes.map((size) => (
-                                                    <option key={size.id} value={size.id}>
-                                                        {size.name} - ₱{size.price.toFixed(2)}
-                                                        {size.maxVarieties > 0 ? ` (Can mix up to ${size.maxVarieties} varieties)` : ' (Bibingka only)'}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => setIsAddSizeOrVarietyOpen(true)}
-                                            className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
-                                        >
-                                            Add New
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* Varieties Selection - Only show after size is selected */}
-                                {stock.sizeId && (
-                                    <div className="space-y-2">
-                                        <label className="block text-sm font-medium text-gray-700">
-                                            Select Varieties (Max: {sizes.find(s => s.id === stock.sizeId)?.maxVarieties})
-                                        </label>
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {varieties.map((variety) => {
-                                                const selectedSize = sizes.find(s => s.id === stock.sizeId);
-                                                const isDisabled = selectedSize?.availableVarieties && 
-                                                    !selectedSize.availableVarieties.includes(variety.name);
-                                                
-                                                const shouldDisable = (selectedSize?.name === 'Solo' || selectedSize?.name === 'Small') && variety.name !== 'Bibingka';
-
-                                                return (
-                                                    <label key={variety.id} className="flex items-center space-x-2">
-                                                        <input
-                                                            type="checkbox"
-                                                            value={variety.name}
-                                                            checked={selectedVarieties.includes(variety.name)}
-                                                            onChange={() => handleVarietyChange(variety.name)}
-                                                            disabled={shouldDisable}
-                                                            className="rounded border-gray-300"
-                                                        />
-                                                        <span className={shouldDisable ? 'text-gray-400' : ''}>
-                                                            {variety.name}
-                                                        </span>
-                                                    </label>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Stock Details */}
-                                <div className="space-y-4">
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
-                    <input
-                        type="number"
-                        name="quantity"
-                        value={stock.quantity}
-                        onChange={handleChange}
-                                                min="0"
-                                                step="1"
-                        required
-                        className="border p-2 rounded w-full"
-                    />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">Minimum Stock</label>
-                    <input
-                                                type="number"
-                                                name="minimumStock"
-                                                value={stock.minimumStock}
-                        onChange={handleChange}
-                                                min="0"
-                                                step="1"
-                        className="border p-2 rounded w-full"
-                    />
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Point</label>
-                    <input
-                                            type="number"
-                                            name="reorderPoint"
-                                            value={stock.reorderPoint}
-                        onChange={handleChange}
-                                            min="0"
-                                            step="1"
-                        className="border p-2 rounded w-full"
-                    />
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">Production Date</label>
-                                            <input
-                                                type="date"
-                                                name="productionDate"
-                                                value={stock.productionDate}
-                                                onChange={handleChange}
-                                                className="border p-2 rounded w-full"
-                                                required
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-700 mb-1">Expiry Date</label>
-                    <input
-                        type="date"
-                                                name="expiryDate"
-                                                value={stock.expiryDate}
-                        onChange={handleChange}
-                        className="border p-2 rounded w-full"
-                                                required
-                                                min={stock.productionDate} // Ensure expiry date is after production date
-                                            />
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Remarks - Full Width */}
-                                <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Remarks</label>
-                    <textarea
-                        name="remarks"
-                        value={stock.remarks}
-                        onChange={handleChange}
-                                        className="border p-2 rounded w-full h-20"
-                    ></textarea>
-                                </div>
-
-                                {/* Form Buttons */}
-                                <div className="md:col-span-2 flex gap-2">
-                    <button
-                        type="submit"
-                                        disabled={loading || selectedVarieties.length === 0}
-                                        className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 flex-1 disabled:opacity-50"
+                {stock.sizeId && (
+                    <>
+                        {/* Add Combination Form */}
+                        <div className="mb-6 p-4 bg-white rounded shadow">
+                            <h2 className="text-xl font-semibold mb-4">Add Variety Combination</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Select Varieties</label>
+                                    <select
+                                        multiple
+                                        className="w-full p-2 border rounded"
+                                        value={currentCombination.varieties}
+                                        onChange={(e) => handleVarietyChange(
+                                            Array.from(e.target.selectedOptions, option => option.value)
+                                        )}
                                     >
-                                        {loading ? 'Processing...' : (editStockId ? 'Update Stock' : 'Add Stock')}
-                                    </button>
-                                    {editStockId && (
-                                    <button
-                                            type="button"
-                                            onClick={resetForm}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                    </button>
-                                    )}
+                                        {VARIETIES.map(variety => (
+                                            <option 
+                                                key={variety} 
+                                                value={variety}
+                                                disabled={
+                                                    (sizes.find(s => s.id === stock.sizeId)?.allowedVarieties &&
+                                                    !sizes.find(s => s.id === stock.sizeId)?.allowedVarieties?.includes(variety)) ||
+                                                    sizes.find(s => s.id === stock.sizeId)?.excludedVarieties?.includes(variety)
+                                                }
+                                            >
+                                                {variety}
+                                            </option>
+                                        ))}
+                                    </select>
                                 </div>
-                </form>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Quantity</label>
+                                    <input
+                                        type="number"
+                                        className="w-full p-2 border rounded"
+                                        value={currentCombination.quantity}
+                                        onChange={(e) => setCurrentCombination(prev => ({
+                                            ...prev,
+                                            quantity: parseInt(e.target.value) || 0
+                                        }))}
+                                        min="1"
+                                    />
+                                </div>
+                            </div>
+                            <button
+                                className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                onClick={handleAddCombination}
+                            >
+                                Add Combination
+                            </button>
                         </div>
 
-                        {/* Stock List */}
-                        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Stock List</h2>
-                            <div className="overflow-x-auto">
-                                <table className="min-w-full">
-                                    <thead>
-                                        <tr className="bg-gray-50">
-                                            <th className="p-3 text-left">Varieties</th>
-                                            <th className="p-3 text-left">Size</th>
-                                            <th className="p-3 text-right">Quantity</th>
-                                            <th className="p-3 text-right">Price</th>
-                                            <th className="p-3 text-center">Stock Status</th>
-                                            <th className="p-3 text-center">Expiry Status</th>
-                                            <th className="p-3 text-left">Expiry Date</th>
-                                            <th className="p-3 text-center">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {filteredStocks.map((stk) => {
-                                            const expiryStatus = getExpiryStatus(stk.expiryDate);
-                                            return (
-                                                <tr key={stk.id} className="border-t hover:bg-gray-50">
-                                                    <td className="p-3">
-                                                        <div className="font-medium">
-                                                            {stk.varieties?.join(', ') || 'No varieties selected'}
-                                                        </div>
-                                                    </td>
-                                                    <td className="p-3">
-                                                        <div className="font-medium">{stk.sizeName}</div>
-                                                    </td>
-                                                    <td className="p-3 text-right">
-                                                        <div className="font-medium">{stk.quantity}</div>
-                                                        <div className="text-sm text-gray-500">Min: {stk.minimumStock}</div>
-                                                    </td>
-                                                    <td className="p-3 text-right">
-                                                        {sizes.find(s => s.id === stk.sizeId)?.price.toLocaleString('en-PH', {
-                                                            style: 'currency',
-                                                            currency: 'PHP'
-                                                        })}
-                                                    </td>
-                                                    <td className="p-3 text-center">
-                                                        <span className={`px-2 py-1 rounded-full text-xs ${
-                                                            stk.quantity <= stk.minimumStock
-                                                                ? 'bg-red-100 text-red-800'
-                                                                : stk.quantity <= stk.reorderPoint
-                                                                ? 'bg-yellow-100 text-yellow-800'
-                                                                : 'bg-green-100 text-green-800'
-                                                        }`}>
-                                                            {stk.quantity <= stk.minimumStock
-                                                                ? 'Low Stock'
-                                                                : stk.quantity <= stk.reorderPoint
-                                                                ? 'Reorder Soon'
-                                                                : 'In Stock'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 text-center">
-                                                        <span className={`px-2 py-1 rounded-full text-xs ${expiryStatus.className}`}>
-                                                            {expiryStatus.status}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 text-left">
-                                                        <div className="font-medium">
-                                                            {new Date(stk.expiryDate).toLocaleDateString()}
-                                                        </div>
-                                                        <div className="text-sm text-gray-500">
-                                                            Prod: {new Date(stk.productionDate).toLocaleDateString()}
-                                                        </div>
-                                                    </td>
-                                                    <td className="p-3">
-                                                        <div className="flex justify-center gap-2">
-                                                            <button
-                                                                onClick={() => handleStockAdjustment(stk.id, 1)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Add Stock"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                                            <button
-                                                                onClick={() => handleStockAdjustment(stk.id, -1)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Remove Stock"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                    <button
-                                                                onClick={() => handleEdit(stk)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Edit"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                                                </svg>
-                                    </button>
-                                    <button
-                                                                onClick={() => handleDelete(stk.id)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Delete"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        {/* Stock History */}
-                        <div className="bg-white p-6 rounded-lg shadow-md">
-                            <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-semibold">Stock History</h2>
-                                <button
-                                    onClick={() => setShowHistory(!showHistory)}
-                                    className="text-blue-600 hover:text-blue-800"
-                                >
-                                    {showHistory ? 'Hide History' : 'Show History'}
-                                </button>
-                            </div>
-                            {showHistory && (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full">
-                                        <thead>
-                                            <tr className="bg-gray-50">
-                                                <th className="p-3 text-left">Date</th>
-                                                <th className="p-3 text-left">Size</th>
-                                                <th className="p-3 text-left">Varieties</th>
-                                                <th className="p-3 text-center">Type</th>
-                                                <th className="p-3 text-right">Previous</th>
-                                                <th className="p-3 text-right">Change</th>
-                                                <th className="p-3 text-right">New</th>
-                                                <th className="p-3 text-left">Updated By</th>
-                                                <th className="p-3 text-left">Remarks</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {stockHistory.map((history) => (
-                                                <tr key={history.id} className="border-t hover:bg-gray-50">
-                                                    <td className="p-3">{history.date.toLocaleDateString()}</td>
-                                                    <td className="p-3">{history.sizeName}</td>
-                                                    <td className="p-3">{(history.varieties || []).join(', ')}</td>
-                                                    <td className="p-3 text-center">
-                                                        <span className={`px-2 py-1 rounded-full text-xs ${
-                                                            history.type === 'in' ? 'bg-green-100 text-green-800' :
-                                                            history.type === 'out' ? 'bg-red-100 text-red-800' :
-                                                            'bg-yellow-100 text-yellow-800'
-                                                        }`}>
-                                                            {history.type === 'in' ? 'Stock In' :
-                                                             history.type === 'out' ? 'Stock Out' :
-                                                             'Adjustment'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 text-right">{history.previousStock}</td>
-                                                    <td className="p-3 text-right">{history.quantity}</td>
-                                                    <td className="p-3 text-right">{history.currentStock}</td>
-                                                    <td className="p-3">{history.updatedBy}</td>
-                                                    <td className="p-3">{history.remarks}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+                        {/* Current Combinations */}
+                        {stock.combinations.length > 0 && (
+                            <div className="mb-6 p-4 bg-white rounded shadow">
+                                <h2 className="text-xl font-semibold mb-4">Current Combinations</h2>
+                                <div className="space-y-2">
+                                    {stock.combinations.map((combination, index) => (
+                                        <div key={index} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                                            <span>{combination.varieties.join(', ')}</span>
+                                            <span>Quantity: {combination.quantity}</span>
+                                            <button
+                                                className="text-red-500 hover:text-red-700"
+                                                onClick={() => {
+                                                    setStock(prev => {
+                                                        const newCombinations = prev.combinations.filter((_, i) => i !== index);
+                                                        const newTotalQuantity = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
+                                                        return {
+                                                            ...prev,
+                                                            combinations: newCombinations,
+                                                            totalQuantity: newTotalQuantity
+                                                        };
+                                                    });
+                                                }}
+                                            >
+                                                Remove
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <div className="mt-4 text-right font-semibold">
+                                        Total Quantity: {stock.totalQuantity}
+                                    </div>
                                 </div>
-                            )}
+                            </div>
+                        )}
+
+                        {/* Stock Details Form */}
+                        <div className="mb-6 p-4 bg-white rounded shadow">
+                            <h2 className="text-xl font-semibold mb-4">Stock Details</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Minimum Stock Level</label>
+                                    <input
+                                        type="number"
+                                        className="w-full p-2 border rounded"
+                                        value={stock.minimumStock}
+                                        onChange={(e) => setStock(prev => ({
+                                            ...prev,
+                                            minimumStock: parseInt(e.target.value) || 0
+                                        }))}
+                                        min="0"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Reorder Point</label>
+                                    <input
+                                        type="number"
+                                        className="w-full p-2 border rounded"
+                                        value={stock.reorderPoint}
+                                        onChange={(e) => setStock(prev => ({
+                                            ...prev,
+                                            reorderPoint: parseInt(e.target.value) || 0
+                                        }))}
+                                        min="0"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Production Date</label>
+                                    <input
+                                        type="date"
+                                        className="w-full p-2 border rounded"
+                                        value={stock.productionDate}
+                                        onChange={(e) => setStock(prev => ({
+                                            ...prev,
+                                            productionDate: e.target.value
+                                        }))}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-2">Expiry Date</label>
+                                    <input
+                                        type="date"
+                                        className="w-full p-2 border rounded"
+                                        value={stock.expiryDate}
+                                        onChange={(e) => setStock(prev => ({
+                                            ...prev,
+                                            expiryDate: e.target.value
+                                        }))}
+                                    />
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-medium mb-2">Remarks</label>
+                                    <textarea
+                                        className="w-full p-2 border rounded"
+                                        value={stock.remarks}
+                                        onChange={(e) => setStock(prev => ({
+                                            ...prev,
+                                            remarks: e.target.value
+                                        }))}
+                                        rows={3}
+                                    />
+                                </div>
+                            </div>
+                            <button
+                                className="mt-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+                                onClick={handleSubmit}
+                                disabled={loading}
+                            >
+                                {loading ? 'Saving...' : 'Save Stock'}
+                            </button>
                         </div>
+                    </>
+                )}
+
+                {/* Stock Chart */}
+                <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+                    <h2 className="text-xl font-semibold mb-4">Stock Levels Overview</h2>
+                    <div className="h-[300px]">
+                        <Line options={chartOptions} data={stockChartData} />
                     </div>
+                </div>
+
+                {/* Stock List */}
+                <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+                    <h2 className="text-xl font-semibold mb-4">Stock List</h2>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full">
+                            <thead>
+                                <tr className="bg-gray-50">
+                                    <th className="p-3 text-left">Varieties</th>
+                                    <th className="p-3 text-left">Size</th>
+                                    <th className="p-3 text-right">Quantity</th>
+                                    <th className="p-3 text-right">Price</th>
+                                    <th className="p-3 text-center">Stock Status</th>
+                                    <th className="p-3 text-center">Expiry Status</th>
+                                    <th className="p-3 text-left">Expiry Date</th>
+                                    <th className="p-3 text-center">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {filteredStocks.map((stk) => {
+                                    const expiryStatus = getExpiryStatus(stk.expiryDate);
+                                    return (
+                                        <tr key={stk.id} className="border-t hover:bg-gray-50">
+                                            <td className="p-3">
+                                                <div className="font-medium">
+                                                    {(stk.combinations || []).map(c => c.varieties.join(', ')).join(' | ') || 'No varieties selected'}
+                                                </div>
+                                            </td>
+                                            <td className="p-3">
+                                                <div className="font-medium">{stk.sizeName}</div>
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                <div className="font-medium">{stk.totalQuantity}</div>
+                                                <div className="text-sm text-gray-500">Min: {stk.minimumStock}</div>
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                {sizes.find(s => s.id === stk.sizeId)?.price.toLocaleString('en-PH', {
+                                                    style: 'currency',
+                                                    currency: 'PHP'
+                                                })}
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-1 rounded-full text-xs ${
+                                                    stk.totalQuantity <= stk.minimumStock
+                                                        ? 'bg-red-100 text-red-800'
+                                                        : stk.totalQuantity <= stk.reorderPoint
+                                                        ? 'bg-yellow-100 text-yellow-800'
+                                                        : 'bg-green-100 text-green-800'
+                                                }`}>
+                                                    {stk.totalQuantity <= stk.minimumStock
+                                                        ? 'Low Stock'
+                                                        : stk.totalQuantity <= stk.reorderPoint
+                                                        ? 'Reorder Soon'
+                                                        : 'In Stock'}
+                                                </span>
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-1 rounded-full text-xs ${expiryStatus.className}`}>
+                                                    {expiryStatus.status}
+                                                </span>
+                                            </td>
+                                            <td className="p-3 text-left">
+                                                <div className="font-medium">
+                                                    {new Date(stk.expiryDate).toLocaleDateString()}
+                                                </div>
+                                                <div className="text-sm text-gray-500">
+                                                    Prod: {new Date(stk.productionDate).toLocaleDateString()}
+                                                </div>
+                                            </td>
+                                            <td className="p-3">
+                                                <div className="flex justify-center gap-2">
+                                                    <button
+                                                        onClick={() => handleStockAdjustment(stk.id, 1)}
+                                                        className="p-1 hover:bg-gray-100 rounded"
+                                                        title="Add Stock"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleStockAdjustment(stk.id, -1)}
+                                                        className="p-1 hover:bg-gray-100 rounded"
+                                                        title="Remove Stock"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleEdit(stk)}
+                                                        className="p-1 hover:bg-gray-100 rounded"
+                                                        title="Edit"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDelete(stk.id)}
+                                                        className="p-1 hover:bg-gray-100 rounded"
+                                                        title="Delete"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {/* Stock History */}
+                <div className="bg-white p-6 rounded-lg shadow-md">
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-xl font-semibold">Stock History</h2>
+                        <button
+                            onClick={() => setShowHistory(!showHistory)}
+                            className="text-blue-600 hover:text-blue-800"
+                        >
+                            {showHistory ? 'Hide History' : 'Show History'}
+                        </button>
+                    </div>
+                    {showHistory && (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full">
+                                <thead>
+                                    <tr className="bg-gray-50">
+                                        <th className="p-3 text-left">Date</th>
+                                        <th className="p-3 text-left">Size</th>
+                                        <th className="p-3 text-left">Varieties</th>
+                                        <th className="p-3 text-center">Type</th>
+                                        <th className="p-3 text-right">Previous</th>
+                                        <th className="p-3 text-right">Change</th>
+                                        <th className="p-3 text-right">New</th>
+                                        <th className="p-3 text-left">Updated By</th>
+                                        <th className="p-3 text-left">Remarks</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {stockHistory.map((history) => (
+                                        <tr key={history.id} className="border-t hover:bg-gray-50">
+                                            <td className="p-3">{history.date.toLocaleDateString()}</td>
+                                            <td className="p-3">{history.sizeName}</td>
+                                            <td className="p-3">
+                                                {history.combination?.varieties?.join(', ') || 'No varieties'}
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <span className={`px-2 py-1 rounded-full text-xs ${
+                                                    history.type === 'in' ? 'bg-green-100 text-green-800' :
+                                                    history.type === 'out' ? 'bg-red-100 text-red-800' :
+                                                    'bg-yellow-100 text-yellow-800'
+                                                }`}>
+                                                    {history.type === 'in' ? 'Stock In' :
+                                                     history.type === 'out' ? 'Stock Out' :
+                                                     'Adjustment'}
+                                                </span>
+                                            </td>
+                                            <td className="p-3 text-right">{history.previousQuantity}</td>
+                                            <td className="p-3 text-right">{history.quantity}</td>
+                                            <td className="p-3 text-right">{history.newQuantity}</td>
+                                            <td className="p-3">{history.updatedBy}</td>
+                                            <td className="p-3">{history.remarks}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                 </div>
             </div>
 
