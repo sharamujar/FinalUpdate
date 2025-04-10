@@ -22,6 +22,15 @@ import {
 } from "firebase/firestore";
 import Sidebar from "@/app/components/Sidebar";
 
+// Add the VARIETIES constant at the top level
+const VARIETIES = [
+    'Bibingka',
+    'Sapin-Sapin',
+    'Kutsinta',
+    'Kalamay',
+    'Cassava'
+] as const;
+
 interface VarietyCombination {
   varieties: string[];
   quantity: number;
@@ -152,8 +161,8 @@ export default function TrackingOrders() {
           productPrice: item.productPrice
         })),
         paymentMethod: order.orderDetails.paymentMethod,
-        paymentStatus: order.orderDetails.paymentStatus || "pending",
-        orderStatus: order.orderDetails.status,
+        paymentStatus: order.orderDetails.paymentStatus || "Pending",
+        orderStatus: order.orderDetails.status || "Order Placed",
         pickupTime: order.orderDetails.pickupTime,
         pickupDate: order.orderDetails.pickupDate,
         totalAmount: order.orderDetails.totalAmount,
@@ -181,7 +190,7 @@ export default function TrackingOrders() {
       console.log("Order tracking updated successfully!");
     } catch (error) {
       console.error("Error saving tracking order:", error);
-      console.error("Order data:", order);
+      throw error; // Propagate the error
     }
   };
 
@@ -232,172 +241,107 @@ export default function TrackingOrders() {
 
   const handleStatusUpdate = async (orderId: string, newStatus: string) => {
     try {
-      const order = orders.find((o) => o.id === orderId);
-      if (!order?.ref) {
-        console.error("No document reference found for order:", orderId);
-        return;
+      const orderRef = doc(db, "orders", orderId);
+      const orderDoc = await getDoc(orderRef);
+
+      if (!orderDoc.exists()) {
+        throw new Error("Order not found");
       }
 
-      // Start a transaction for any status update
+      const order = { id: orderDoc.id, ...orderDoc.data() } as Order;
+
       await runTransaction(db, async (transaction) => {
-        // Get the order document reference
-        const orderRef = doc(db, "orders", orderId);
-        const orderDoc = await transaction.get(orderRef);
+        // STEP 1: Perform all reads first
+        const stockUpdates = [];
+        const historyUpdates = [];
         
-        if (!orderDoc.exists()) {
-          throw new Error("Order not found");
+        // Read tracking order document
+        const trackingOrdersRef = collection(db, "tracking_orders");
+        const trackingQuery = query(trackingOrdersRef, where("orderId", "==", orderId));
+        const trackingDocs = await getDocs(trackingQuery);
+
+        // If completing order, read daily sales document first
+        let dailySalesDoc = undefined;
+        if (newStatus === "Completed") {
+          const today = new Date();
+          const dateString = today.toISOString().split('T')[0];
+          const dailySalesRef = doc(collection(db, "daily_sales"), dateString);
+          dailySalesDoc = await transaction.get(dailySalesRef);
         }
 
-        // If the new status is "Ready for Pickup", reduce stock
         if (newStatus === "Ready for Pickup") {
-          // For each item in the order
+          // Read all necessary stock documents first
           for (const item of order.items) {
-            // Find the matching stock
             const stocksRef = collection(db, "stocks");
-            const stockSnapshot = await getDocs(stocksRef);
+            const varietyStockQuery = query(
+              stocksRef,
+              where("type", "==", "variety")
+            );
+            const varietySnapshot = await getDocs(varietyStockQuery);
             
-            console.log('Looking for stock:', {
-              size: item.productSize,
-              varieties: item.productVarieties
-            });
-
-            // Find stock with matching size and varieties
-            const matchingStock = stockSnapshot.docs.find(doc => {
-              const stockData = doc.data();
-              console.log('Checking stock:', {
-                id: doc.id,
-                sizeName: stockData.sizeName,
-                combinations: stockData.combinations
-              });
-
-              // First check if size matches
-              if (stockData.sizeName !== item.productSize) {
-                return false;
-              }
-
-              // Then check combinations
-              return stockData.combinations.some(combo => {
-                // For Tray and Big Bilao, we need to check if the varieties match in any order
-                if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
-                  // Sort both arrays to compare regardless of order
-                  const sortedOrderVarieties = [...item.productVarieties].sort();
-                  const sortedComboVarieties = [...combo.varieties].sort();
-                  
-                  console.log('Comparing varieties:', {
-                    orderVarieties: sortedOrderVarieties,
-                    comboVarieties: sortedComboVarieties,
-                    matches: JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties)
-                  });
-
-                  return JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties);
-                }
-                
-                // For other sizes, just check if the variety exists in the combination
-                return item.productVarieties.every(v => combo.varieties.includes(v));
-              });
-            });
-
-            if (!matchingStock) {
-              console.error('No matching stock found. Available stocks:', 
-                stockSnapshot.docs.map(doc => ({
-                  id: doc.id,
-                  data: doc.data()
-                }))
+            // Find and validate stocks for each variety
+            for (const variety of item.productVarieties) {
+              const correctVariety = VARIETIES.find(
+                (v: string) => v.toLowerCase() === variety.toLowerCase()
               );
-              throw new Error(`No stock found for ${item.productSize} with varieties ${item.productVarieties.join(", ")}`);
-            }
+              
+              if (!correctVariety) {
+                throw new Error(`Invalid variety name: ${variety}`);
+              }
 
-            const stockData = matchingStock.data() as StockData;
+              const varietyStock = varietySnapshot.docs.find(doc => {
+                const data = doc.data();
+                return data.variety.toLowerCase() === correctVariety.toLowerCase();
+              });
+
+              if (!varietyStock) {
+                throw new Error(`No stock found for variety: ${variety}`);
+              }
+
+              const varietyData = varietyStock.data();
+              if (varietyData.quantity < item.productQuantity) {
+                throw new Error(`Insufficient stock for variety: ${varietyData.variety}`);
+              }
+
+              // Store the update information for later
+              stockUpdates.push({
+                ref: varietyStock.ref,
+                data: varietyData,
+                quantity: item.productQuantity,
+                variety: correctVariety
+              });
+            }
+          }
+        }
+
+        // STEP 2: Perform all writes after all reads are complete
+        if (newStatus === "Ready for Pickup") {
+          // Update all stocks
+          for (const update of stockUpdates) {
+            const newQuantity = update.data.quantity - update.quantity;
             
-            // Find the matching combination
-            const matchingCombo = stockData.combinations.find(combo => {
-              if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
-                // Sort both arrays to compare regardless of order
-                const sortedOrderVarieties = [...item.productVarieties].sort();
-                const sortedComboVarieties = [...combo.varieties].sort();
-                return JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties);
-              }
-              return item.productVarieties.every(v => combo.varieties.includes(v));
+            // Update stock
+            transaction.update(update.ref, {
+              quantity: newQuantity,
+              lastUpdated: new Date().toISOString()
             });
 
-            if (!matchingCombo || matchingCombo.quantity < item.productQuantity) {
-              throw new Error(`Insufficient stock for ${item.productSize} with varieties ${item.productVarieties.join(", ")}`);
-            }
-
-            // Update the combinations array
-            const updatedCombinations = stockData.combinations.map(combo => {
-              if (item.productSize === "Tray" || item.productSize === "Big Bilao") {
-                // Sort both arrays to compare regardless of order
-                const sortedOrderVarieties = [...item.productVarieties].sort();
-                const sortedComboVarieties = [...combo.varieties].sort();
-                if (JSON.stringify(sortedOrderVarieties) === JSON.stringify(sortedComboVarieties)) {
-                  return {
-                    ...combo,
-                    quantity: combo.quantity - item.productQuantity
-                  };
-                }
-              } else if (item.productVarieties.every(v => combo.varieties.includes(v))) {
-                return {
-                  ...combo,
-                  quantity: combo.quantity - item.productQuantity
-                };
-              }
-              return combo;
-            });
-
-            const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
-
-            // Update stock document
-            transaction.update(matchingStock.ref, {
-              combinations: updatedCombinations,
-              totalQuantity: newTotalQuantity,
-              lastUpdated: new Date()
-            });
-
-            // Add stock history entry
+            // Create stock history record
             const historyRef = doc(collection(db, "stockHistory"));
             transaction.set(historyRef, {
-              sizeId: stockData.sizeId,
-              sizeName: stockData.sizeName,
-              combination: {
-                varieties: item.productVarieties,
-                quantity: item.productQuantity
-              },
-              type: 'out',
-              quantity: item.productQuantity,
-              previousQuantity: stockData.totalQuantity,
-              newQuantity: newTotalQuantity,
+              stockId: update.ref.id,
+              size: "",
+              variety: update.variety,
+              type: "out",
+              quantity: update.quantity,
+              previousQuantity: update.data.quantity,
+              newQuantity: newQuantity,
               date: new Date(),
               updatedBy: "Order System",
               remarks: `Order ${orderId} ready for pickup`,
-              stockId: matchingStock.id,
               isDeleted: false
             });
           }
-        }
-        
-        // If the new status is "Completed", update sales data
-        if (newStatus === "Completed") {
-          // Add to sales collection
-          const salesRef = doc(collection(db, "sales"));
-          transaction.set(salesRef, {
-            orderId: orderId,
-            amount: order.orderDetails.totalAmount,
-            date: Timestamp.fromDate(new Date()),
-            items: order.items.map(item => ({
-              size: item.productSize,
-              varieties: item.productVarieties,
-              quantity: item.productQuantity,
-              price: item.productPrice,
-              subtotal: item.productQuantity * item.productPrice
-            })),
-            paymentMethod: order.orderDetails.paymentMethod,
-            customerName: order.userDetails ? `${order.userDetails.firstName} ${order.userDetails.lastName}` : 'Unknown'
-          });
-
-          // Update inventory valuation
-          // This will be reflected in the inventory reports automatically
-          // through the existing queries
         }
 
         // Update order status
@@ -408,12 +352,100 @@ export default function TrackingOrders() {
             "orderDetails.completedAt": new Date().toISOString()
           } : {})
         });
+
+        // Update tracking order if exists
+        if (trackingDocs.size > 0) {
+          const trackingDoc = trackingDocs.docs[0];
+          transaction.update(trackingDoc.ref, {
+            orderStatus: newStatus,
+            updatedAt: Timestamp.now()
+          });
+        }
+
+        // If order is completed, record the sale
+        if (newStatus === "Completed") {
+          // Create sales record
+          const salesRef = doc(collection(db, "sales"));
+          transaction.set(salesRef, {
+            orderId: orderId,
+            customerName: order.userDetails 
+              ? `${order.userDetails.firstName} ${order.userDetails.lastName}` 
+              : "Walk-in Customer",
+            items: order.items.map(item => ({
+              size: item.productSize,
+              varieties: item.productVarieties || [],
+              quantity: item.productQuantity,
+              price: item.productPrice,
+              subtotal: item.productQuantity * item.productPrice
+            })),
+            totalAmount: order.orderDetails.totalAmount,
+            paymentMethod: order.orderDetails.paymentMethod,
+            paymentStatus: order.orderDetails.paymentStatus || "Completed",
+            orderDate: order.orderDetails.createdAt,
+            completedDate: new Date().toISOString(),
+            status: "Completed",
+            date: new Date()
+          });
+
+          // Update daily sales
+          const today = new Date();
+          const dateString = today.toISOString().split('T')[0];
+          const dailySalesRef = doc(collection(db, "daily_sales"), dateString);
+          
+          if (dailySalesDoc && dailySalesDoc.exists()) {
+            const currentData = dailySalesDoc.data();
+            transaction.update(dailySalesRef, {
+              totalAmount: (currentData.totalAmount || 0) + order.orderDetails.totalAmount,
+              orderCount: (currentData.orderCount || 0) + 1,
+              lastUpdated: new Date().toISOString(),
+              orders: [...(currentData.orders || []), {
+                orderId: orderId,
+                amount: order.orderDetails.totalAmount,
+                customerName: order.userDetails 
+                  ? `${order.userDetails.firstName} ${order.userDetails.lastName}` 
+                  : "Walk-in Customer",
+                completedAt: new Date().toISOString(),
+                items: order.items.map(item => ({
+                  size: item.productSize,
+                  varieties: item.productVarieties || [],
+                  quantity: item.productQuantity,
+                  price: item.productPrice,
+                  subtotal: item.productQuantity * item.productPrice
+                }))
+              }]
+            });
+          } else {
+            transaction.set(dailySalesRef, {
+              date: dateString,
+              totalAmount: order.orderDetails.totalAmount,
+              orderCount: 1,
+              lastUpdated: new Date().toISOString(),
+              orders: [{
+                orderId: orderId,
+                amount: order.orderDetails.totalAmount,
+                customerName: order.userDetails 
+                  ? `${order.userDetails.firstName} ${order.userDetails.lastName}` 
+                  : "Walk-in Customer",
+                completedAt: new Date().toISOString(),
+                items: order.items.map(item => ({
+                  size: item.productSize,
+                  varieties: item.productVarieties || [],
+                  quantity: item.productQuantity,
+                  price: item.productPrice,
+                  subtotal: item.productQuantity * item.productPrice
+                }))
+              }]
+            });
+          }
+        }
       });
 
-      alert(`Order ${newStatus === "Completed" ? "completed and sales updated" : "status updated"} successfully!`);
+      alert(newStatus === "Completed" 
+        ? "Order completed and sales recorded successfully!" 
+        : "Order status updated successfully!");
     } catch (error) {
       console.error("Error updating order status:", error);
-      alert(error instanceof Error ? error.message : "Failed to update order status.");
+      alert(error instanceof Error ? error.message : "Failed to update order status");
     }
   };
 

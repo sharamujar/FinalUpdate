@@ -27,7 +27,15 @@ ChartJS.register(
   Legend
 );
 
-// Define available varieties
+const SIZES = [
+    'Big Bilao',
+    'Tray',
+    'Half Tray',
+    'Small',
+    'Solo',
+    '1/4'
+];
+
 const VARIETIES = [
     'Bibingka',
     'Sapin-Sapin',
@@ -84,7 +92,7 @@ const sizeConfigs: Size[] = [
     {
         id: '6',
         name: '1/4 Slice',
-        price: 120.00,
+        price: 140.00,
         maxVarieties: 5,
         minVarieties: 1,
         boxPrice: 140.00,
@@ -111,23 +119,23 @@ interface Size {
 
 interface Stock {
     id: string;
-    sizeId: string;
-    sizeName: string;
-    combinations: VarietyCombination[];
-    totalQuantity: number;
+    type: 'size' | 'variety';
+    size: string;
+    variety?: string;
+    quantity: number;
     minimumStock: number;
     reorderPoint: number;
-    productionDate: string;
-    expiryDate: string;
-    lastUpdated: Date;
-    remarks: string;
+    combinations?: VarietyCombination[];
+    productionDate?: string;
+    expiryDate?: string;
+    lastUpdated?: string;
 }
 
 interface StockHistory {
     id: string;
-    sizeId: string;
-    sizeName: string;
-    combination: VarietyCombination;
+    stockId: string;
+    size: string;
+    variety: string;
     type: 'in' | 'out' | 'adjustment' | 'deleted';
     quantity: number;
     previousQuantity: number;
@@ -135,7 +143,6 @@ interface StockHistory {
     date: Date;
     updatedBy: string;
     remarks: string;
-    stockId: string;
     isDeleted: boolean;
 }
 
@@ -151,23 +158,15 @@ interface ChartData {
 }
 
 interface OrderDetails {
-    sizeId: string;
+    orderId: string;
+    size: string;
     varieties: string[];
     quantity: number;
-    orderId: string;
 }
 
 // Move the function outside and before the Stock component
-export const updateStockOnOrderStatus = async (
-    orderDetails: {
-        orderId: string;
-        sizeId: string;
-        varieties: string[];
-        quantity: number;
-    }
-) => {
+export const updateStockOnOrderStatus = async (orderDetails: OrderDetails) => {
     try {
-        // 1. Find the stock with matching size and varieties
         const stocksRef = collection(db, "stocks");
         const stocksSnapshot = await getDocs(stocksRef);
         const stocks = stocksSnapshot.docs.map(doc => ({
@@ -175,68 +174,99 @@ export const updateStockOnOrderStatus = async (
             ...doc.data()
         })) as Stock[];
 
-        const matchingStock = stocks.find(stock => {
-            return stock.sizeId === orderDetails.sizeId &&
-                stock.combinations.some(combo => 
-                    orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-                    combo.varieties.length === orderDetails.varieties.length
-                );
-        });
-
-        if (!matchingStock) {
-            throw new Error('Stock not available for the requested combination');
-        }
-
-        // 2. Check if enough quantity is available
-        const matchingCombo = matchingStock.combinations.find(combo => 
-            orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-            combo.varieties.length === orderDetails.varieties.length
+        // Find the matching size-based stock
+        const sizeStock = stocks.find(stock => 
+            stock.type === 'size' && 
+            stock.size === orderDetails.size
         );
 
-        if (!matchingCombo || matchingCombo.quantity < orderDetails.quantity) {
-            throw new Error('Insufficient stock quantity');
+        // Find matching variety-based stocks
+        const varietyStocks = stocks.filter(stock => 
+            stock.type === 'variety' && 
+            orderDetails.varieties.includes(stock.variety || '')
+        );
+
+        // Validate stock availability
+        if (!sizeStock) {
+            throw new Error(`Size stock not available for ${orderDetails.size}`);
         }
 
-        // 3. Update stock quantities
-        const stockRef = doc(db, "stocks", matchingStock.id);
-        const updatedCombinations = matchingStock.combinations.map(combo => {
-            if (orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-                combo.varieties.length === orderDetails.varieties.length) {
-                return {
-                    ...combo,
-                    quantity: combo.quantity - orderDetails.quantity
-                };
+        // Check if we have all required variety stocks
+        const missingVarieties = orderDetails.varieties.filter(v => 
+            !varietyStocks.some(stock => stock.variety === v)
+        );
+
+        if (missingVarieties.length > 0) {
+            throw new Error(`Variety stocks not available for: ${missingVarieties.join(', ')}`);
+        }
+
+        // Check quantities
+        for (const varietyStock of varietyStocks) {
+            if ((varietyStock.quantity || 0) < orderDetails.quantity) {
+                throw new Error(`Insufficient stock for variety: ${varietyStock.variety}`);
             }
-            return combo;
-        });
+        }
 
-        const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
+        // All validations passed, proceed with stock updates
+        const updates = [];
 
-        // 4. Update stock in database
-        await updateDoc(stockRef, {
-            combinations: updatedCombinations,
-            totalQuantity: newTotalQuantity,
-            lastUpdated: new Date()
-        });
+        // Update size stock
+        if (sizeStock) {
+            const newSizeQuantity = sizeStock.quantity - orderDetails.quantity;
+            updates.push(updateDoc(doc(db, "stocks", sizeStock.id), {
+                quantity: newSizeQuantity,
+                lastUpdated: new Date().toISOString()
+            }));
 
-        // 5. Record in stock history
-        await addDoc(collection(db, "stockHistory"), {
-            sizeId: orderDetails.sizeId,
-            sizeName: matchingStock.sizeName,
-            combination: {
-                varieties: orderDetails.varieties,
-                quantity: orderDetails.quantity
-            },
+            // Record in stock history
+            updates.push(addDoc(collection(db, "stockHistory"), {
+                stockId: sizeStock.id,
+                size: sizeStock.size,
+                variety: '',
             type: 'out',
             quantity: orderDetails.quantity,
-            previousQuantity: matchingStock.totalQuantity,
-            newQuantity: newTotalQuantity,
+                previousQuantity: sizeStock.quantity,
+                newQuantity: newSizeQuantity,
             date: new Date(),
             updatedBy: "Order System",
-            remarks: `Order ready for pickup - Order ID: ${orderDetails.orderId}`,
-            stockId: matchingStock.id,
+                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
             isDeleted: false
-        });
+            }));
+        }
+
+        // Update variety stocks
+        for (const varietyStock of varietyStocks) {
+            const newVarietyQuantity = (varietyStock.quantity || 0) - orderDetails.quantity;
+            
+            updates.push(updateDoc(doc(db, "stocks", varietyStock.id), {
+                quantity: newVarietyQuantity,
+                lastUpdated: new Date().toISOString()
+            }));
+
+            // Record in stock history
+            updates.push(addDoc(collection(db, "stockHistory"), {
+                stockId: varietyStock.id,
+                size: '',
+                variety: varietyStock.variety,
+                type: 'out',
+                quantity: orderDetails.quantity,
+                previousQuantity: varietyStock.quantity || 0,
+                newQuantity: newVarietyQuantity,
+                date: new Date(),
+                updatedBy: "Order System",
+                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
+                isDeleted: false
+            }));
+
+            // Check if reorder point reached
+            if (newVarietyQuantity <= (varietyStock.reorderPoint || 0)) {
+                console.log(`Reorder point reached for variety: ${varietyStock.variety}`);
+                // You can implement additional notification logic here
+            }
+        }
+
+        // Execute all updates
+        await Promise.all(updates);
 
         return {
             success: true,
@@ -244,31 +274,71 @@ export const updateStockOnOrderStatus = async (
         };
 
     } catch (error) {
-        console.error('Error updating stock for order:', error);
+        console.error('Error processing order:', error);
         throw error;
+    }
+};
+
+// Update the date conversion logic
+const formatDate = (dateStr: string | undefined): string => {
+    if (!dateStr) return '-';
+    try {
+        const date = new Date(dateStr);
+        if (isNaN(date.getTime())) return '-';
+        return date.toLocaleDateString();
+    } catch {
+        return '-';
     }
 };
 
 export default function Stock() {
     const [stocks, setStocks] = useState<Stock[]>([]);
     const [stockHistory, setStockHistory] = useState<StockHistory[]>([]);
-    const [stock, setStock] = useState<Stock>({
+    
+    // Separate states for size and variety stocks
+    const [sizeStock, setSizeStock] = useState<Stock>({
         id: '',
-        sizeId: '',
-        sizeName: '',
-        combinations: [],
-        totalQuantity: 0,
+        type: 'size',
+        size: '',
+        quantity: 0,
+        minimumStock: 0,
+        reorderPoint: 0,
+        lastUpdated: new Date().toISOString()
+    });
+
+    const [varietyStock, setVarietyStock] = useState<Stock>({
+        id: '',
+        type: 'variety',
+        size: '',
+        variety: '',
+        quantity: 0,
         minimumStock: 0,
         reorderPoint: 0,
         productionDate: '',
         expiryDate: '',
-        lastUpdated: new Date(),
-        remarks: ''
+        lastUpdated: new Date().toISOString()
     });
+
     const [editStockId, setEditStockId] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [showHistory, setShowHistory] = useState(false);
-    const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
+    const [filterCategory, setFilterCategory] = useState('all');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [showLowStock, setShowLowStock] = useState(false);
+    const [sizes, setSizes] = useState<Size[]>(sizeConfigs);
+    const [selectedVarieties, setSelectedVarieties] = useState<string[]>([]);
+    const [isAddSizeOrVarietyOpen, setIsAddSizeOrVarietyOpen] = useState(false);
+    const [isAddSizeOpen, setIsAddSizeOpen] = useState(false);
+    const [isAddVarietyOpen, setIsAddVarietyOpen] = useState(false);
+    const [newSizeName, setNewSizeName] = useState('');
+    const [newSizePrice, setNewSizePrice] = useState('');
+    const [newSizeMaxVarieties, setNewSizeMaxVarieties] = useState('1');
+    const [newVarietyName, setNewVarietyName] = useState('');
+    const [varieties, setVarieties] = useState<{ id: string; name: string }[]>([]);
+    const [currentCombination, setCurrentCombination] = useState<VarietyCombination>({
+        varieties: [],
+        quantity: 0
+    });
     const [stockChartData, setStockChartData] = useState<ChartData>({
         labels: [],
         datasets: [{
@@ -279,21 +349,8 @@ export default function Stock() {
             tension: 0.1
         }]
     });
-    const [filterCategory, setFilterCategory] = useState('all');
-    const [searchTerm, setSearchTerm] = useState('');
-    const [showLowStock, setShowLowStock] = useState(false);
-    const [sizes, setSizes] = useState<Size[]>(sizeConfigs);
-    const [selectedVarieties, setSelectedVarieties] = useState<string[]>([]);
-    const [isAddSizeOrVarietyOpen, setIsAddSizeOrVarietyOpen] = useState(false);
-    const [newSizeName, setNewSizeName] = useState('');
-    const [newSizePrice, setNewSizePrice] = useState('');
-    const [newSizeMaxVarieties, setNewSizeMaxVarieties] = useState('1');
-    const [newVarietyName, setNewVarietyName] = useState('');
-    const [varieties, setVarieties] = useState<{ id: string; name: string }[]>([]);
-    const [currentCombination, setCurrentCombination] = useState<VarietyCombination>({
-        varieties: [],
-        quantity: 0
-    });
+
+    const [filterType, setFilterType] = useState<'all' | 'size' | 'variety'>('all');
 
     useEffect(() => {
         fetchSizes();
@@ -307,10 +364,8 @@ export default function Stock() {
             const querySnapshot = await getDocs(collection(db, "stocks"));
             const stockList = querySnapshot.docs.map(doc => ({
                 id: doc.id,
-                ...doc.data(),
-                lastUpdated: doc.data().lastUpdated?.toDate() || new Date()
+                ...doc.data()
             })) as Stock[];
-            console.log("Fetched stocks with IDs:", stockList.map(s => ({ id: s.id, name: s.sizeName })));
             setStocks(stockList);
             updateStockChart(stockList);
         } catch (error) {
@@ -333,7 +388,6 @@ export default function Stock() {
                 date: doc.data().date.toDate()
             })) as StockHistory[];
             
-            // Filter out history entries for deleted stocks if needed
             const filteredHistory = historyList.filter(history => !history.isDeleted);
             setStockHistory(filteredHistory);
         } catch (error) {
@@ -370,93 +424,122 @@ export default function Stock() {
         }
     };
 
-    const updateStockChart = (stockList: Stock[]) => {
-        const sortedStocks = [...stockList].sort((a, b) => b.totalQuantity - a.totalQuantity);
+    const updateStockChart = (stockData: Stock[]) => {
+        const labels: string[] = [];
+        const quantities: number[] = [];
+        const minimums: number[] = [];
+        const reorderPoints: number[] = [];
+
+        stockData.forEach(stock => {
+            if (stock.type === 'size' && stock.combinations && stock.combinations.length > 0) {
+                // For stocks with combinations
+                stock.combinations.forEach(combo => {
+                    const varietyLabel = combo.varieties?.join('/') || 'N/A';
+                    const label = `${stock.size} - ${varietyLabel}`;
+                    labels.push(label);
+                    quantities.push(combo.quantity);
+                    minimums.push(stock.minimumStock);
+                    reorderPoints.push(stock.reorderPoint);
+                });
+            } else {
+                // For regular stocks
+                const label = stock.variety ? `${stock.size} - ${stock.variety}` : stock.size;
+                labels.push(label);
+                quantities.push(stock.quantity);
+                minimums.push(stock.minimumStock);
+                reorderPoints.push(stock.reorderPoint);
+            }
+        });
+
         setStockChartData({
-            labels: sortedStocks.map(s => s.sizeName),
-            datasets: [{
-                label: 'Current Stock Level',
-                data: sortedStocks.map(s => s.totalQuantity),
+            labels,
+            datasets: [
+                {
+                    label: 'Current Stock',
+                    data: quantities,
                 borderColor: 'rgb(75, 192, 192)',
                 backgroundColor: 'rgba(75, 192, 192, 0.5)',
                 tension: 0.1
-            }]
+                },
+                {
+                    label: 'Minimum Stock',
+                    data: minimums,
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgba(255, 99, 132, 0.5)',
+                    tension: 0.1
+                },
+                {
+                    label: 'Reorder Point',
+                    data: reorderPoints,
+                    borderColor: 'rgb(255, 205, 86)',
+                    backgroundColor: 'rgba(255, 205, 86, 0.5)',
+                    tension: 0.1
+                }
+            ]
         });
     };
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-        const { name, value } = e.target;
-        setStock(prev => ({
-            ...prev,
-            [name]: name === 'quantity' || name === 'price' || name === 'minimumStock' || name === 'reorderPoint' 
-                ? parseFloat(value) 
-                : value
-        }));
-    };
-
-    const handleSizeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const selectedSize = sizes.find(s => s.id === e.target.value);
-        if (!selectedSize) return;
-
-        // Reset combinations when size changes
-        setStock(prev => ({
-            ...prev,
-            sizeId: selectedSize.id,
-            sizeName: selectedSize.name,
-            combinations: [],
-            totalQuantity: 0
-        }));
-
-        // For Solo and Small, automatically add Bibingka
-        if (selectedSize.name === 'Solo' || selectedSize.name === 'Small') {
-            setCurrentCombination({
-                varieties: ['Bibingka'],
-                quantity: 0
-            });
-        } else {
-            setCurrentCombination({
-                varieties: [],
-                quantity: 0
-            });
-        }
-    };
-
-    const handleSubmit = async (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent, type: 'size' | 'variety') => {
         e.preventDefault();
         setLoading(true);
 
         try {
-            const selectedSize = sizes.find(s => s.id === stock.sizeId);
-            
-            if (!selectedSize) {
-                alert("Please select a size");
+            if (type === 'size') {
+                // Validation for size-based stock
+                if (!sizeStock.size || sizeStock.quantity <= 0) {
+                    alert("Please select a size and enter a valid quantity");
                 setLoading(false);
                 return;
             }
 
-            if (stock.combinations.length === 0) {
-                alert("Please add at least one variety combination");
+                const newStockData = {
+                    type: 'size',
+                    size: sizeStock.size,
+                    variety: '', // Empty for size-based stock
+                    quantity: sizeStock.quantity,
+                    minimumStock: 0, // Default values for size-based stock
+                    reorderPoint: 0,
+                    productionDate: new Date().toISOString().split('T')[0],
+                    expiryDate: new Date().toISOString().split('T')[0],
+                    lastUpdated: new Date().toISOString()
+                };
+
+                const docRef = await addDoc(collection(db, "stocks"), newStockData);
+                await updateDoc(docRef, { id: docRef.id });
+
+                await addDoc(collection(db, "stockHistory"), {
+                    stockId: docRef.id,
+                    size: sizeStock.size,
+                    variety: '',
+                    type: 'in',
+                    quantity: sizeStock.quantity,
+                    previousQuantity: 0,
+                    newQuantity: sizeStock.quantity,
+                    date: new Date(),
+                    updatedBy: "Admin",
+                    remarks: "Initial size stock entry",
+                    isDeleted: false
+                });
+
+                alert("Size stock added successfully!");
+            } else {
+                // Validation for variety-based stock
+                if (!varietyStock.variety || varietyStock.quantity <= 0) {
+                    alert("Please select a variety and enter a valid quantity");
                 setLoading(false);
                 return;
             }
 
-            // Validate total quantity
-            if (stock.totalQuantity <= 0) {
-                alert("Total quantity must be greater than 0");
-                setLoading(false);
-                return;
-            }
-
-            // Check if expiry date is after production date
-            const expiryDate = new Date(stock.expiryDate);
-            const productionDate = new Date(stock.productionDate);
-            const currentDate = new Date();
-
-            if (!stock.productionDate || !stock.expiryDate) {
+                // Check dates for variety-based stock
+                if (!varietyStock.productionDate || !varietyStock.expiryDate) {
                 alert("Please set both production and expiry dates");
                 setLoading(false);
                 return;
             }
+
+                const expiryDate = new Date(varietyStock.expiryDate);
+                const productionDate = new Date(varietyStock.productionDate);
+                const currentDate = new Date();
 
             if (expiryDate <= productionDate) {
                 alert("Expiry date must be after production date");
@@ -464,7 +547,6 @@ export default function Stock() {
                 return;
             }
 
-            // Check if the stock is already expired
             if (expiryDate <= currentDate) {
                 if (!confirm("Warning: This stock is already expired! Do you still want to add it?")) {
                     setLoading(false);
@@ -472,50 +554,31 @@ export default function Stock() {
                 }
             }
 
-            // Check if expiry date is approaching (within 7 days)
-            const sevenDaysFromNow = new Date();
-            sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7);
-            
-            if (expiryDate <= sevenDaysFromNow) {
-                alert("Warning: This stock will expire within 7 days!");
-            }
-
-            // Ensure the price is included in the stock data
             const newStockData = {
-                ...stock,
-                lastUpdated: new Date(),
-                sizeName: selectedSize.name,
-                price: selectedSize.price,
-                varieties: selectedVarieties,
-                id: ''
-            };
+                    ...varietyStock,
+                    type: 'variety',
+                    size: '', // Empty for variety-based stock
+                    lastUpdated: new Date().toISOString()
+                };
 
-            console.log("Submitting stock data:", newStockData);
-
-            if (editStockId) {
-                const stockRef = doc(db, "stocks", editStockId);
-                await updateDoc(stockRef, newStockData);
-                alert("Stock updated successfully!");
-            } else {
                 const docRef = await addDoc(collection(db, "stocks"), newStockData);
                 await updateDoc(docRef, { id: docRef.id });
 
                 await addDoc(collection(db, "stockHistory"), {
-                    sizeId: selectedSize.id,
-                    sizeName: selectedSize.name,
-                    combination: stock.combinations[0],
+                    stockId: docRef.id,
+                    size: '',
+                    variety: varietyStock.variety,
                     type: 'in',
-                    quantity: stock.totalQuantity,
+                    quantity: varietyStock.quantity,
                     previousQuantity: 0,
-                    newQuantity: stock.totalQuantity,
+                    newQuantity: varietyStock.quantity,
                     date: new Date(),
                     updatedBy: "Admin",
-                    remarks: "Initial stock entry",
-                    stockId: docRef.id,
+                    remarks: "Initial variety stock entry",
                     isDeleted: false
                 });
 
-                alert("Stock added successfully!");
+                alert("Variety stock added successfully!");
             }
 
             resetForm();
@@ -538,7 +601,7 @@ export default function Stock() {
                 return;
             }
 
-            const newQuantity = currentStock.totalQuantity + adjustment;
+            const newQuantity = currentStock.quantity + adjustment;
             if (newQuantity < 0) {
                 alert("Stock cannot be negative!");
                 return;
@@ -546,30 +609,26 @@ export default function Stock() {
 
             const timestamp = new Date();
             
-            // Update the stock quantity
             await updateDoc(stockRef, {
-                totalQuantity: newQuantity,
-                lastUpdated: timestamp
+                quantity: newQuantity,
+                lastUpdated: timestamp.toISOString()
             });
 
-            // Record in history with stockId and combinations
             await addDoc(collection(db, "stockHistory"), {
-                sizeId: currentStock.sizeId,
-                sizeName: currentStock.sizeName,
-                combination: currentStock.combinations[0],
+                stockId: id,
+                size: currentStock.size,
+                variety: currentStock.variety,
                 type: adjustment > 0 ? 'in' : 'out',
                 quantity: Math.abs(adjustment),
-                previousQuantity: currentStock.totalQuantity,
+                previousQuantity: currentStock.quantity,
                 newQuantity: newQuantity,
                 date: timestamp,
                 updatedBy: "Admin",
                 remarks: `Stock ${adjustment > 0 ? 'added' : 'removed'}: ${Math.abs(adjustment)} units`,
-                stockId: id,
                 isDeleted: false
             });
 
             await Promise.all([fetchStocks(), fetchStockHistory()]);
-            
             alert(`Stock ${adjustment > 0 ? 'added' : 'removed'} successfully!`);
         } catch (error) {
             console.error("Error adjusting stock:", error);
@@ -577,19 +636,7 @@ export default function Stock() {
         }
     };
 
-    const handleEdit = (stk: Stock) => {
-        setEditStockId(stk.id);
-        setStock(stk);
-    };
-
     const handleDelete = async (id: string) => {
-        console.log("Attempting to delete stock with ID:", id);
-        
-        if (!id) {
-            alert("Invalid stock ID!");
-            return;
-        }
-
         if (!confirm("Are you sure you want to delete this stock?")) {
             return;
         }
@@ -603,42 +650,23 @@ export default function Stock() {
                 return;
             }
 
-            // Delete the stock
             await deleteDoc(stockRef);
 
-            // Record final deletion in history with safe combination handling
             await addDoc(collection(db, "stockHistory"), {
-                sizeId: currentStock.sizeId,
-                sizeName: currentStock.sizeName,
-                combination: currentStock.combinations && currentStock.combinations.length > 0 
-                    ? currentStock.combinations[0] 
-                    : { varieties: [], quantity: 0 },
+                stockId: id,
+                size: currentStock.size,
+                variety: currentStock.variety,
                 type: 'deleted',
-                quantity: currentStock.totalQuantity,
-                previousQuantity: currentStock.totalQuantity,
+                quantity: currentStock.quantity,
+                previousQuantity: currentStock.quantity,
                 newQuantity: 0,
                 date: new Date(),
                 updatedBy: "Admin",
                 remarks: "Stock deleted",
-                stockId: id,
                 isDeleted: true
             });
 
-            // Update existing history entries for this stock
-            const historyQuery = query(
-                collection(db, "stockHistory"),
-                where("stockId", "==", id)
-            );
-            
-            const historySnapshot = await getDocs(historyQuery);
-            const updatePromises = historySnapshot.docs.map(doc => 
-                updateDoc(doc.ref, { isDeleted: true })
-            );
-            await Promise.all(updatePromises);
-
-            // Refresh the stocks list and history
             await Promise.all([fetchStocks(), fetchStockHistory()]);
-            
             alert("Stock deleted successfully!");
         } catch (error) {
             console.error("Error deleting stock:", error);
@@ -647,33 +675,44 @@ export default function Stock() {
     };
 
     const resetForm = () => {
-        setStock({
+        setSizeStock({
             id: '',
-            sizeId: '',
-            sizeName: '',
-            combinations: [],
-            totalQuantity: 0,
+            type: 'size',
+            size: '',
+            quantity: 0,
+            minimumStock: 0,
+            reorderPoint: 0,
+            lastUpdated: new Date().toISOString()
+        });
+        setVarietyStock({
+            id: '',
+            type: 'variety',
+            size: '',
+            variety: '',
+            quantity: 0,
             minimumStock: 0,
             reorderPoint: 0,
             productionDate: '',
             expiryDate: '',
-            lastUpdated: new Date(),
-            remarks: ''
+            lastUpdated: new Date().toISOString()
         });
         setEditStockId(null);
-        setSelectedVarieties([]);
     };
 
-    console.log("Stocks before filtering:", stocks);
+    const handleEdit = (stk: Stock) => {
+        setEditStockId(stk.id);
+        if (stk.type === 'size') {
+            setSizeStock(stk);
+        } else {
+            setVarietyStock(stk);
+        }
+    };
 
     const filteredStocks = stocks
-        .filter(s => filterCategory === 'all' || s.sizeName === filterCategory)
-        .filter(s => showLowStock ? s.totalQuantity <= s.minimumStock : true)
-        .filter(s => 
-            s.sizeName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            s.combinations?.some(c => c.varieties.some(v => v.toLowerCase().includes(searchTerm.toLowerCase()))) ||
-            ''
-        );
+        .filter(s => filterType === 'all' || s.type === filterType)
+        .filter(s => filterCategory === 'all' || s.size === filterCategory)
+        .filter(s => showLowStock ? s.quantity <= s.minimumStock : true)
+        .filter(s => !searchTerm || (s.variety?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()));
 
     const chartOptions = {
         responsive: true,
@@ -690,7 +729,7 @@ export default function Stock() {
     };
 
     const handleVarietyChange = (selectedVarieties: string[]) => {
-        const selectedSize = sizes.find(s => s.id === stock.sizeId);
+        const selectedSize = sizes.find(s => s.id === sizeStock.size);
         if (!selectedSize) return;
 
         // Validate against size constraints
@@ -730,11 +769,11 @@ export default function Stock() {
             return;
         }
 
-        const selectedSize = sizes.find(s => s.id === stock.sizeId);
+        const selectedSize = sizes.find(s => s.id === sizeStock.size);
         if (!selectedSize) return;
 
         // Check if this combination would exceed maximum varieties
-        const existingVarieties = new Set(stock.combinations.flatMap(c => c.varieties));
+        const existingVarieties = new Set(sizeStock.combinations?.flatMap(c => c.varieties) ?? []);
         const newVarieties = new Set([...existingVarieties, ...currentCombination.varieties]);
         
         if (newVarieties.size > selectedSize.maxVarieties) {
@@ -742,14 +781,14 @@ export default function Stock() {
             return;
         }
 
-        setStock(prev => {
-            const newCombinations = [...prev.combinations, currentCombination];
+        setSizeStock(prev => {
+            const newCombinations = [...(prev.combinations ?? []), currentCombination];
             const newTotalQuantity = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
             
             return {
                 ...prev,
                 combinations: newCombinations,
-                totalQuantity: newTotalQuantity
+                quantity: newTotalQuantity
             };
         });
 
@@ -760,40 +799,53 @@ export default function Stock() {
         });
     };
 
-    const handleAddSizeOrVariety = async (e: React.FormEvent) => {
+    const handleAddSize = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            // Add new size to Firestore
-            if (newSizeName && newSizePrice) {
+            if (!newSizeName || !newSizePrice) {
+                alert('Please fill in all size fields');
+                return;
+            }
+
                 await addDoc(collection(db, "sizes"), {
                     name: newSizeName,
                     price: parseFloat(newSizePrice),
                     maxVarieties: parseInt(newSizeMaxVarieties),
                     createdAt: new Date()
                 });
+            
                 setNewSizeName('');
                 setNewSizePrice('');
                 setNewSizeMaxVarieties('1');
+            await fetchSizes();
+            alert("Successfully added new size!");
+            setIsAddSizeOpen(false);
+        } catch (error) {
+            console.error("Error adding size:", error);
+            alert("Failed to add size");
+        }
+    };
+
+    const handleAddVariety = async (e: React.FormEvent) => {
+        e.preventDefault();
+        try {
+            if (!newVarietyName) {
+                alert('Please enter a variety name');
+                return;
             }
 
-            // Add new variety to Firestore
-            if (newVarietyName) {
                 await addDoc(collection(db, "varieties"), {
                     name: newVarietyName,
                     createdAt: new Date()
                 });
-                setNewVarietyName('');
-            }
-
-            // Refresh the sizes and varieties
-            await fetchSizes(); // Refresh sizes
-            await fetchVarieties(); // Refresh varieties
-
-            alert("Successfully added new size/variety!");
-            setIsAddSizeOrVarietyOpen(false);
+            
+            setNewVarietyName('');
+            await fetchVarieties();
+            alert("Successfully added new variety!");
+            setIsAddVarietyOpen(false);
         } catch (error) {
-            console.error("Error adding size/variety:", error);
-            alert("Failed to add size/variety");
+            console.error("Error adding variety:", error);
+            alert("Failed to add variety");
         }
     };
 
@@ -837,347 +889,318 @@ export default function Stock() {
         return { status: 'Valid', className: 'bg-green-100 text-green-800' };
     };
 
-    const handleOrderPlacement = async (orderDetails: OrderDetails) => {
-        try {
-            // 1. Find the stock with matching size and varieties
-            const matchingStock = stocks.find(stock => {
-                return stock.sizeId === orderDetails.sizeId &&
-                    stock.combinations.some(combo => 
-                        orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-                        combo.varieties.length === orderDetails.varieties.length
-                    );
-            });
-
-            if (!matchingStock) {
-                throw new Error('Stock not available for the requested combination');
-            }
-
-            // 2. Check if enough quantity is available
-            const matchingCombo = matchingStock.combinations.find(combo => 
-                orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-                combo.varieties.length === orderDetails.varieties.length
-            );
-
-            if (!matchingCombo || matchingCombo.quantity < orderDetails.quantity) {
-                throw new Error('Insufficient stock quantity');
-            }
-
-            // 3. Calculate price
-            const size = sizes.find(s => s.id === orderDetails.sizeId);
-            if (!size) {
-                throw new Error('Invalid size selected');
-            }
-
-            const totalPrice = size.price * orderDetails.quantity;
-
-            // 4. Update stock quantities
-            const stockRef = doc(db, "stocks", matchingStock.id);
-            const updatedCombinations = matchingStock.combinations.map(combo => {
-                if (orderDetails.varieties.every(v => combo.varieties.includes(v)) &&
-                    combo.varieties.length === orderDetails.varieties.length) {
-                    return {
-                        ...combo,
-                        quantity: combo.quantity - orderDetails.quantity
-                    };
-                }
-                return combo;
-            });
-
-            const newTotalQuantity = updatedCombinations.reduce((sum, combo) => sum + combo.quantity, 0);
-
-            // 5. Update stock in database
-            await updateDoc(stockRef, {
-                combinations: updatedCombinations,
-                totalQuantity: newTotalQuantity,
-                lastUpdated: new Date()
-            });
-
-            // 6. Record in stock history
-            await addDoc(collection(db, "stockHistory"), {
-                sizeId: orderDetails.sizeId,
-                sizeName: size.name,
-                combination: {
-                    varieties: orderDetails.varieties,
-                    quantity: orderDetails.quantity
-                },
-                type: 'out',
-                quantity: orderDetails.quantity,
-                previousQuantity: matchingStock.totalQuantity,
-                newQuantity: newTotalQuantity,
-                date: new Date(),
-                updatedBy: "Order System",
-                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
-                stockId: matchingStock.id,
-                isDeleted: false
-            });
-
-            // 7. Check if reorder point reached
-            if (newTotalQuantity <= matchingStock.reorderPoint) {
-                // TODO: Implement notification system
-                console.log(`Reorder point reached for ${size.name} with varieties: ${orderDetails.varieties.join(', ')}`);
-            }
-
-            // 8. Refresh stocks
-            await fetchStocks();
-
-            return {
-                success: true,
-                price: totalPrice,
-                message: 'Stock updated successfully'
-            };
-
-        } catch (error) {
-            console.error('Error processing order:', error);
-            throw error;
-        }
-    };
-
     return (
         <ProtectedRoute>
             <div className="container mx-auto px-4 py-8">
                 <h1 className="text-2xl font-bold mb-6">Stock Management</h1>
                 
-                {/* Size Selection */}
-                <div className="mb-6 p-4 bg-white rounded shadow">
-                    <h2 className="text-xl font-semibold mb-4">Select Size</h2>
-                    <select
-                        className="w-full p-2 border rounded"
-                        value={stock.sizeId}
-                        onChange={handleSizeChange}
+                <div className="flex justify-end space-x-2 mb-4">
+                    <button
+                        onClick={() => setIsAddSizeOpen(true)}
+                        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
                     >
-                        <option value="">Select a size...</option>
-                        {sizes.map(size => (
-                            <option key={size.id} value={size.id}>
-                                {size.name} - {size.description}
-                            </option>
-                        ))}
-                    </select>
+                        Add New Size
+                    </button>
+                    <button
+                        onClick={() => setIsAddVarietyOpen(true)}
+                        className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+                    >
+                        Add New Variety
+                    </button>
                 </div>
 
-                {stock.sizeId && (
-                    <>
-                        {/* Add Combination Form */}
-                        <div className="mb-6 p-4 bg-white rounded shadow">
-                            <h2 className="text-xl font-semibold mb-4">Add Variety Combination</h2>
+                {/* Size-based Stock Form */}
+                <div className="mb-8 p-4 bg-gray-50 rounded">
+                    <h3 className="text-lg font-semibold mb-4">Add Size Stock</h3>
+                    <form onSubmit={(e) => handleSubmit(e, 'size')} className="space-y-4">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium mb-2">Select Varieties</label>
+                                <label className="block text-sm font-medium mb-2">Select Size</label>
                                     <select
-                                        multiple
                                         className="w-full p-2 border rounded"
-                                        value={currentCombination.varieties}
-                                        onChange={(e) => handleVarietyChange(
-                                            Array.from(e.target.selectedOptions, option => option.value)
-                                        )}
-                                    >
-                                        {VARIETIES.map(variety => (
-                                            <option 
-                                                key={variety} 
-                                                value={variety}
-                                                disabled={
-                                                    (sizes.find(s => s.id === stock.sizeId)?.allowedVarieties &&
-                                                    !sizes.find(s => s.id === stock.sizeId)?.allowedVarieties?.includes(variety)) ||
-                                                    sizes.find(s => s.id === stock.sizeId)?.excludedVarieties?.includes(variety)
-                                                }
-                                            >
-                                                {variety}
-                                            </option>
+                                    value={sizeStock.size}
+                                    onChange={(e) => setSizeStock(prev => ({ ...prev, size: e.target.value }))}
+                                    required
+                                >
+                                    <option value="">Select Size...</option>
+                                    {sizes.map(size => (
+                                        <option key={size.id} value={size.name}>{size.name}</option>
                                         ))}
                                     </select>
                                 </div>
+
                                 <div>
                                     <label className="block text-sm font-medium mb-2">Quantity</label>
                                     <input
                                         type="number"
                                         className="w-full p-2 border rounded"
-                                        value={currentCombination.quantity}
-                                        onChange={(e) => setCurrentCombination(prev => ({
-                                            ...prev,
-                                            quantity: parseInt(e.target.value) || 0
-                                        }))}
-                                        min="1"
+                                    value={sizeStock.quantity}
+                                    onChange={(e) => setSizeStock(prev => ({ ...prev, quantity: parseInt(e.target.value) || 0 }))}
+                                    min="0"
+                                    required
                                     />
                                 </div>
                             </div>
+
+                        <div className="flex justify-end">
                             <button
-                                className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                                onClick={handleAddCombination}
+                                type="submit"
+                                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                disabled={loading}
                             >
-                                Add Combination
+                                {loading ? 'Adding...' : 'Add Size Stock'}
                             </button>
                         </div>
+                    </form>
+                        </div>
 
-                        {/* Current Combinations */}
-                        {stock.combinations.length > 0 && (
-                            <div className="mb-6 p-4 bg-white rounded shadow">
-                                <h2 className="text-xl font-semibold mb-4">Current Combinations</h2>
-                                <div className="space-y-2">
-                                    {stock.combinations.map((combination, index) => (
-                                        <div key={index} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                                            <span>{combination.varieties.join(', ')}</span>
-                                            <span>Quantity: {combination.quantity}</span>
-                                            <button
-                                                className="text-red-500 hover:text-red-700"
-                                                onClick={() => {
-                                                    setStock(prev => {
-                                                        const newCombinations = prev.combinations.filter((_, i) => i !== index);
-                                                        const newTotalQuantity = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
-                                                        return {
-                                                            ...prev,
-                                                            combinations: newCombinations,
-                                                            totalQuantity: newTotalQuantity
-                                                        };
-                                                    });
-                                                }}
-                                            >
-                                                Remove
-                                            </button>
-                                        </div>
+                {/* Variety-based Stock Form */}
+                <div className="p-4 bg-gray-50 rounded mb-8">
+                    <h3 className="text-lg font-semibold mb-4">Add Variety Stock</h3>
+                    <form onSubmit={(e) => handleSubmit(e, 'variety')} className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Variety</label>
+                                <select
+                                    className="w-full p-2 border rounded"
+                                    value={varietyStock.variety}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, variety: e.target.value }))}
+                                    required
+                                >
+                                    <option value="">Select Variety...</option>
+                                    {varieties.map(variety => (
+                                        <option key={variety.id} value={variety.name}>{variety.name}</option>
                                     ))}
-                                    <div className="mt-4 text-right font-semibold">
-                                        Total Quantity: {stock.totalQuantity}
+                                </select>
                                     </div>
-                                </div>
-                            </div>
-                        )}
 
-                        {/* Stock Details Form */}
-                        <div className="mb-6 p-4 bg-white rounded shadow">
-                            <h2 className="text-xl font-semibold mb-4">Stock Details</h2>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Quantity</label>
+                                <input
+                                    type="number"
+                                    className="w-full p-2 border rounded"
+                                    value={varietyStock.quantity}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, quantity: parseInt(e.target.value) || 0 }))}
+                                    min="0"
+                                    required
+                                />
+                                </div>
+
                                 <div>
-                                    <label className="block text-sm font-medium mb-2">Minimum Stock Level</label>
+                                <label className="block text-sm font-medium mb-2">Low Stock Level</label>
                                     <input
                                         type="number"
                                         className="w-full p-2 border rounded"
-                                        value={stock.minimumStock}
-                                        onChange={(e) => setStock(prev => ({
-                                            ...prev,
-                                            minimumStock: parseInt(e.target.value) || 0
-                                        }))}
+                                    value={varietyStock.minimumStock}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, minimumStock: parseInt(e.target.value) || 0 }))}
                                         min="0"
+                                    required
                                     />
                                 </div>
+
                                 <div>
-                                    <label className="block text-sm font-medium mb-2">Reorder Point</label>
+                                <label className="block text-sm font-medium mb-2">Critical Level (Reorder Point)</label>
                                     <input
                                         type="number"
                                         className="w-full p-2 border rounded"
-                                        value={stock.reorderPoint}
-                                        onChange={(e) => setStock(prev => ({
-                                            ...prev,
-                                            reorderPoint: parseInt(e.target.value) || 0
-                                        }))}
+                                    value={varietyStock.reorderPoint}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, reorderPoint: parseInt(e.target.value) || 0 }))}
                                         min="0"
+                                    required
                                     />
                                 </div>
+
                                 <div>
                                     <label className="block text-sm font-medium mb-2">Production Date</label>
                                     <input
                                         type="date"
                                         className="w-full p-2 border rounded"
-                                        value={stock.productionDate}
-                                        onChange={(e) => setStock(prev => ({
-                                            ...prev,
-                                            productionDate: e.target.value
-                                        }))}
+                                    value={varietyStock.productionDate}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, productionDate: e.target.value }))}
+                                    required
                                     />
                                 </div>
+
                                 <div>
                                     <label className="block text-sm font-medium mb-2">Expiry Date</label>
                                     <input
                                         type="date"
                                         className="w-full p-2 border rounded"
-                                        value={stock.expiryDate}
-                                        onChange={(e) => setStock(prev => ({
-                                            ...prev,
-                                            expiryDate: e.target.value
-                                        }))}
+                                    value={varietyStock.expiryDate}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, expiryDate: e.target.value }))}
+                                    required
                                     />
                                 </div>
-                                <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium mb-2">Remarks</label>
-                                    <textarea
-                                        className="w-full p-2 border rounded"
-                                        value={stock.remarks}
-                                        onChange={(e) => setStock(prev => ({
-                                            ...prev,
-                                            remarks: e.target.value
-                                        }))}
-                                        rows={3}
-                                    />
                                 </div>
-                            </div>
+
+                        <div className="flex justify-end space-x-3">
                             <button
-                                className="mt-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
-                                onClick={handleSubmit}
+                                type="button"
+                                onClick={resetForm}
+                                className="px-4 py-2 border rounded hover:bg-gray-100"
+                            >
+                                Reset
+                            </button>
+                            <button
+                                type="submit"
+                                className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
                                 disabled={loading}
                             >
-                                {loading ? 'Saving...' : 'Save Stock'}
+                                {loading ? 'Adding...' : 'Add Variety Stock'}
                             </button>
                         </div>
-                    </>
-                )}
-
-                {/* Stock Chart */}
-                <div className="bg-white p-6 rounded-lg shadow-md mb-6">
-                    <h2 className="text-xl font-semibold mb-4">Stock Levels Overview</h2>
-                    <div className="h-[300px]">
-                        <Line options={chartOptions} data={stockChartData} />
-                    </div>
+                    </form>
                 </div>
 
                 {/* Stock List */}
-                <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+                <div className="bg-white p-6 rounded-lg shadow-md">
                     <h2 className="text-xl font-semibold mb-4">Stock List</h2>
-                    <div className="overflow-x-auto">
+                    
+                    {/* Filters */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                        <select
+                            className="p-2 border rounded"
+                            value={filterType}
+                            onChange={(e) => setFilterType(e.target.value as 'all' | 'size' | 'variety')}
+                        >
+                            <option value="all">All Types</option>
+                            <option value="size">Size Stocks</option>
+                            <option value="variety">Variety Stocks</option>
+                        </select>
+
+                        <select
+                            className="p-2 border rounded"
+                            value={filterCategory}
+                            onChange={(e) => setFilterCategory(e.target.value)}
+                        >
+                            <option value="all">All Sizes</option>
+                            {sizes.map(size => (
+                                <option key={size.id} value={size.name}>{size.name}</option>
+                            ))}
+                        </select>
+
+                        <input
+                            type="text"
+                            placeholder="Search by variety..."
+                            className="p-2 border rounded"
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                        />
+
+                        <label className="flex items-center">
+                            <input
+                                type="checkbox"
+                                checked={showLowStock}
+                                onChange={(e) => setShowLowStock(e.target.checked)}
+                                className="mr-2"
+                            />
+                            Show Low Stock Only
+                        </label>
+                    </div>
+
+                    {/* Size Stock Table */}
+                    {(filterType === 'all' || filterType === 'size') && (
+                        <>
+                            <h3 className="text-lg font-semibold mb-2">Size Stocks</h3>
+                            <div className="overflow-x-auto mb-8">
                         <table className="min-w-full">
                             <thead>
                                 <tr className="bg-gray-50">
-                                    <th className="p-3 text-left">Varieties</th>
                                     <th className="p-3 text-left">Size</th>
                                     <th className="p-3 text-right">Quantity</th>
-                                    <th className="p-3 text-right">Price</th>
+                                            <th className="p-3 text-center">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {filteredStocks
+                                            .filter(s => s.type === 'size')
+                                            .filter(s => filterCategory === 'all' || s.size === filterCategory)
+                                            .map((stk) => (
+                                                <tr key={stk.id} className="border-t hover:bg-gray-50">
+                                                    <td className="p-3">{stk.size}</td>
+                                                    <td className="p-3 text-right">{stk.quantity}</td>
+                                                    <td className="p-3">
+                                                        <div className="flex justify-center gap-2">
+                                                            <button
+                                                                onClick={() => handleStockAdjustment(stk.id, 1)}
+                                                                className="p-1 hover:bg-gray-100 rounded"
+                                                                title="Add Stock"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor">
+                                                                    <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                                                                </svg>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleStockAdjustment(stk.id, -1)}
+                                                                className="p-1 hover:bg-gray-100 rounded"
+                                                                title="Remove Stock"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
+                                                                    <path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                                                                </svg>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDelete(stk.id)}
+                                                                className="p-1 hover:bg-gray-100 rounded"
+                                                                title="Delete"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
+                                                                    <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </>
+                    )}
+
+                    {/* Variety Stock Table */}
+                    {(filterType === 'all' || filterType === 'variety') && (
+                        <>
+                            <h3 className="text-lg font-semibold mb-2">Variety Stocks</h3>
+                            <div className="overflow-x-auto">
+                                <table className="min-w-full">
+                                    <thead>
+                                        <tr className="bg-gray-50">
+                                            <th className="p-3 text-left">Variety</th>
+                                            <th className="p-3 text-right">Quantity</th>
+                                            <th className="p-3 text-right">Min. Stock</th>
+                                            <th className="p-3 text-right">Reorder Point</th>
                                     <th className="p-3 text-center">Stock Status</th>
                                     <th className="p-3 text-center">Expiry Status</th>
+                                            <th className="p-3 text-left">Production Date</th>
                                     <th className="p-3 text-left">Expiry Date</th>
                                     <th className="p-3 text-center">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {filteredStocks.map((stk) => {
-                                    const expiryStatus = getExpiryStatus(stk.expiryDate);
+                                        {filteredStocks
+                                            .filter(s => s.type === 'variety')
+                                            .filter(s => !searchTerm || (s.variety?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()))
+                                            .filter(s => showLowStock ? s.quantity <= s.minimumStock : true)
+                                            .map((stk) => {
+                                                const expiryStatus = stk.expiryDate ? getExpiryStatus(stk.expiryDate) : { status: 'N/A', className: 'bg-gray-100 text-gray-800' };
                                     return (
                                         <tr key={stk.id} className="border-t hover:bg-gray-50">
-                                            <td className="p-3">
-                                                <div className="font-medium">
-                                                    {(stk.combinations || []).map(c => c.varieties.join(', ')).join(' | ') || 'No varieties selected'}
-                                                </div>
-                                            </td>
-                                            <td className="p-3">
-                                                <div className="font-medium">{stk.sizeName}</div>
-                                            </td>
-                                            <td className="p-3 text-right">
-                                                <div className="font-medium">{stk.totalQuantity}</div>
-                                                <div className="text-sm text-gray-500">Min: {stk.minimumStock}</div>
-                                            </td>
-                                            <td className="p-3 text-right">
-                                                {sizes.find(s => s.id === stk.sizeId)?.price.toLocaleString('en-PH', {
-                                                    style: 'currency',
-                                                    currency: 'PHP'
-                                                })}
-                                            </td>
+                                                        <td className="p-3">{stk.variety}</td>
+                                                        <td className="p-3 text-right">{stk.quantity}</td>
+                                                        <td className="p-3 text-right">{stk.minimumStock}</td>
+                                                        <td className="p-3 text-right">{stk.reorderPoint}</td>
                                             <td className="p-3 text-center">
                                                 <span className={`px-2 py-1 rounded-full text-xs ${
-                                                    stk.totalQuantity <= stk.minimumStock
+                                                                stk.quantity <= stk.minimumStock
                                                         ? 'bg-red-100 text-red-800'
-                                                        : stk.totalQuantity <= stk.reorderPoint
+                                                                    : stk.quantity <= stk.reorderPoint
                                                         ? 'bg-yellow-100 text-yellow-800'
                                                         : 'bg-green-100 text-green-800'
                                                 }`}>
-                                                    {stk.totalQuantity <= stk.minimumStock
+                                                                {stk.quantity <= stk.minimumStock
                                                         ? 'Low Stock'
-                                                        : stk.totalQuantity <= stk.reorderPoint
+                                                                    : stk.quantity <= stk.reorderPoint
                                                         ? 'Reorder Soon'
                                                         : 'In Stock'}
                                                 </span>
@@ -1187,14 +1210,8 @@ export default function Stock() {
                                                     {expiryStatus.status}
                                                 </span>
                                             </td>
-                                            <td className="p-3 text-left">
-                                                <div className="font-medium">
-                                                    {new Date(stk.expiryDate).toLocaleDateString()}
-                                                </div>
-                                                <div className="text-sm text-gray-500">
-                                                    Prod: {new Date(stk.productionDate).toLocaleDateString()}
-                                                </div>
-                                            </td>
+                                                        <td className="p-3">{formatDate(stk.productionDate)}</td>
+                                                        <td className="p-3">{formatDate(stk.expiryDate)}</td>
                                             <td className="p-3">
                                                 <div className="flex justify-center gap-2">
                                                     <button
@@ -1241,10 +1258,12 @@ export default function Stock() {
                             </tbody>
                         </table>
                     </div>
+                        </>
+                    )}
                 </div>
 
                 {/* Stock History */}
-                <div className="bg-white p-6 rounded-lg shadow-md">
+                <div className="bg-white p-6 rounded-lg shadow-md mt-6">
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="text-xl font-semibold">Stock History</h2>
                         <button
@@ -1261,7 +1280,7 @@ export default function Stock() {
                                     <tr className="bg-gray-50">
                                         <th className="p-3 text-left">Date</th>
                                         <th className="p-3 text-left">Size</th>
-                                        <th className="p-3 text-left">Varieties</th>
+                                        <th className="p-3 text-left">Variety</th>
                                         <th className="p-3 text-center">Type</th>
                                         <th className="p-3 text-right">Previous</th>
                                         <th className="p-3 text-right">Change</th>
@@ -1274,10 +1293,8 @@ export default function Stock() {
                                     {stockHistory.map((history) => (
                                         <tr key={history.id} className="border-t hover:bg-gray-50">
                                             <td className="p-3">{history.date.toLocaleDateString()}</td>
-                                            <td className="p-3">{history.sizeName}</td>
-                                            <td className="p-3">
-                                                {history.combination?.varieties?.join(', ') || 'No varieties'}
-                                            </td>
+                                            <td className="p-3">{history.size}</td>
+                                            <td className="p-3">{history.variety}</td>
                                             <td className="p-3 text-center">
                                                 <span className={`px-2 py-1 rounded-full text-xs ${
                                                     history.type === 'in' ? 'bg-green-100 text-green-800' :
@@ -1302,119 +1319,6 @@ export default function Stock() {
                     )}
                 </div>
             </div>
-
-            {/* Modal for Adding New Size/Variety */}
-            {isAddSizeOrVarietyOpen && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg w-full max-w-md max-h-[80vh] overflow-y-auto">
-                        <h2 className="text-xl font-semibold mb-4">Manage Sizes and Varieties</h2>
-                        <form onSubmit={handleAddSizeOrVariety} className="space-y-4">
-                            {/* Existing size input fields */}
-                            <div className="border-b pb-4">
-                                <h3 className="font-medium mb-2">Add New Size</h3>
-                                <div className="space-y-2">
-                                    <input
-                                        type="text"
-                                        placeholder="Size Name (e.g., Family Bilao)"
-                                        value={newSizeName}
-                                        onChange={(e) => setNewSizeName(e.target.value)}
-                                        className="w-full p-2 border rounded"
-                                    />
-                                    <input
-                                        type="number"
-                                        placeholder="Price"
-                                        value={newSizePrice}
-                                        onChange={(e) => setNewSizePrice(e.target.value)}
-                                        className="w-full p-2 border rounded"
-                                        min="0"
-                                        step="0.01"
-                                    />
-                                    <div>
-                                        <label className="block text-sm text-gray-600 mb-1">
-                                            Maximum Varieties Allowed
-                                        </label>
-                                        <input
-                                            type="number"
-                                            value={newSizeMaxVarieties}
-                                            onChange={(e) => setNewSizeMaxVarieties(e.target.value)}
-                                            className="w-full p-2 border rounded"
-                                            min="0"
-                                            max="5"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            {/* Current Sizes List */}
-                            <div className="border-b pb-4">
-                                <h3 className="font-medium mb-2">Current Sizes</h3>
-                                <div className="space-y-2">
-                                    {sizes.map((size) => (
-                                        <div key={size.id} className="flex justify-between items-center">
-                                            <span>{size.name} - ₱{size.price}</span>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleDeleteSize(size.id)}
-                                                className="text-red-600 hover:text-red-800"
-                                            >
-                                        Delete
-                                    </button>
-                                </div>
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Existing variety input field */}
-                            <div className="border-b pb-4">
-                                <h3 className="font-medium mb-2">Add New Variety</h3>
-                                <input
-                                    type="text"
-                                    placeholder="Variety Name"
-                                    value={newVarietyName}
-                                    onChange={(e) => setNewVarietyName(e.target.value)}
-                                    className="w-full p-2 border rounded"
-                                />
-                            </div>
-
-                            {/* Current Varieties List */}
-                            <div className="border-b pb-4">
-                                <h3 className="font-medium mb-2">Current Varieties</h3>
-                                <div className="space-y-2">
-                                    {varieties.map((variety) => (
-                                        <div key={variety.id} className="flex justify-between items-center">
-                                            <span>{variety.name}</span>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleDeleteVariety(variety.id)}
-                                                className="text-red-600 hover:text-red-800"
-                                            >
-                                                Delete
-                                            </button>
-                            </div>
-                        ))}
-                    </div>
-                            </div>
-
-                            {/* Existing form buttons */}
-                            <div className="flex justify-end gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => setIsAddSizeOrVarietyOpen(false)}
-                                    className="px-4 py-2 text-gray-600 hover:text-gray-800"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                                >
-                                    Add
-                                </button>
-                            </div>
-                        </form>
-                </div>
-            </div>
-            )}
         </ProtectedRoute>
     );
 }
