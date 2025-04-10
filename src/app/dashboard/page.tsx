@@ -5,9 +5,9 @@ import { signOut } from "firebase/auth";
 import { auth } from "../firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
 import { useEffect, useState } from "react";
-import { collection, getDocs, query, where, orderBy, limit, Timestamp, getDoc, doc } from "firebase/firestore";
+import { collection, getDocs, query, where, orderBy, limit, Timestamp } from "firebase/firestore";
 import { db } from "../firebase-config"; // Adjust the import based on your setup
-import { Line, Bar, Doughnut } from 'react-chartjs-2';
+import { Line, Bar } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -20,8 +20,6 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
-import React from 'react';
-/* import Notification from "@/app/components/Notification"; // Import the Notification component */
 
 // Register ChartJS components
 ChartJS.register(
@@ -40,6 +38,7 @@ interface SalesData {
   daily: number;
   weekly: number;
   monthly: number;
+  trend: { date: string; sales: number }[];
 }
 
 interface PopularProduct {
@@ -60,10 +59,12 @@ interface RecentOrder {
 interface LowStockItem {
   id: string;
   name: string;
-  varieties: string[];
   currentStock: number;
   minimumStock: number;
-  reorderPoint: number;
+  criticalLevel: number;
+  type: 'size' | 'variety';
+  severity: 'critical' | 'low';
+  varieties?: string[];
 }
 
 interface ChartData {
@@ -80,24 +81,26 @@ interface ChartData {
 
 interface Stock {
   id: string;
-  productName: string;
   quantity: number;
-  unit: string;
-  supplier: string;
-  supplierContact: string;
-  supplierEmail: string;
   minimumStock: number;
-  reorderPoint: number;
-  receivedDate: string;
-  lastUpdated: Date;
-  price: number;
-  category: string;
-  location: string;
-  remarks: string;
-  varieties?: string[];
-  sizeName?: string;
+  criticalLevel: number;
+  type: 'size' | 'variety';
+  productName?: string;
+  unit?: string;
+  supplier?: string;
+  supplierContact?: string;
+  supplierEmail?: string;
+  receivedDate?: string;
+  lastUpdated?: Date;
+  price?: number;
+  category?: string;
+  location?: string;
+  remarks?: string;
   size?: string;
   variety?: string;
+  totalSlices?: number;
+  sizeName?: string;
+  slicesPerUnit?: number;
 }
 
 interface OrderData {
@@ -118,31 +121,21 @@ interface OrderData {
   };
 }
 
-interface CustomerData {
-  firstName: string;
-  lastName: string;
-}
-
-interface GroupedStock {
-  id: string;
-  size: string;
-  variety: string;
-  quantity: number;
-  minimumStock: number;
-  reorderPoint: number;
-  varieties: string[];
+interface Notification {
+  message: string;
+  type: 'success' | 'error' | 'warning';
 }
 
 export default function Dashboard() {
   const router = useRouter(); // Next.js navigation
-  const [salesData, setSalesData] = useState<SalesData>({ daily: 0, weekly: 0, monthly: 0 });
+  const [salesData, setSalesData] = useState<SalesData>({ daily: 0, weekly: 0, monthly: 0, trend: [] });
   const [popularProducts, setPopularProducts] = useState<PopularProduct[]>([]);
   const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
   const [lowStockItems, setLowStockItems] = useState<LowStockItem[]>([]);
   const [totalRevenue, setTotalRevenue] = useState(0);
   const [totalInventoryValue, setTotalInventoryValue] = useState(0);
   const [totalProducts, setTotalProducts] = useState(0);
-  const [notifications, setNotifications] = useState<{ message: string; type: 'success' | 'error' | 'warning' }[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [salesChartData, setSalesChartData] = useState<ChartData>({
@@ -181,20 +174,10 @@ export default function Dashboard() {
 
   const [stock, setStock] = useState<Stock>({
     id: '',
-    productName: "",
     quantity: 0,
-    unit: "",
-    supplier: "",
-    supplierContact: "",
-    supplierEmail: "",
     minimumStock: 0,
-    reorderPoint: 0,
-    receivedDate: "",
-    lastUpdated: new Date(),
-    price: 0,
-    category: "",
-    location: "",
-    remarks: ""
+    criticalLevel: 0,
+    type: 'size'
   });
 
   const [stockList, setStockList] = useState<Stock[]>([]);
@@ -277,7 +260,7 @@ export default function Dashboard() {
         return acc + data.orderDetails.totalAmount;
       }, 0);
 
-      setSalesData({ daily: dailySales, weekly: weeklySales, monthly: monthlySales });
+      setSalesData({ daily: dailySales, weekly: weeklySales, monthly: monthlySales, trend: [] });
       setTotalRevenue(monthlySales);
 
       // Prepare sales trend data
@@ -441,27 +424,47 @@ export default function Dashboard() {
 
   const fetchLowStockItems = async () => {
     try {
-      const stockRef = collection(db, "stocks");
-      const snapshot = await getDocs(stockRef);
+      const sizeStocksRef = collection(db, "sizeStocks");
+      const varietyStocksRef = collection(db, "varietyStocks");
+
+      const [sizeStocksSnapshot, varietyStocksSnapshot] = await Promise.all([
+        getDocs(sizeStocksRef),
+        getDocs(varietyStocksRef)
+      ]);
       
-      const stockItems = snapshot.docs
-        .map(doc => ({
-          id: doc.id,
-          name: doc.data().sizeName || doc.data().variety || doc.data().productName,
-          varieties: doc.data().varieties || [],
-          currentStock: doc.data().quantity,
-          minimumStock: doc.data().minimumStock || 10,
-          reorderPoint: doc.data().reorderPoint || 20
-        }))
-        .filter(item => item.currentStock <= item.reorderPoint || item.currentStock === 0);
+      // Process size stocks
+      const sizeStockItems = sizeStocksSnapshot.docs.map(doc => ({
+        id: doc.id,
+        name: doc.data().size || 'N/A',
+        currentStock: doc.data().quantity || 0,
+        minimumStock: doc.data().minimumStock || 10,
+        criticalLevel: doc.data().criticalLevel || 20,
+        type: 'size' as const
+      }));
+
+      // Process variety stocks
+      const varietyStockItems = varietyStocksSnapshot.docs.map(doc => ({
+        id: doc.id,
+        name: doc.data().variety || 'N/A',
+        currentStock: doc.data().quantity || 0,
+        minimumStock: doc.data().minimumStock || 10,
+        criticalLevel: doc.data().criticalLevel || 20,
+        type: 'variety' as const
+      }));
+
+      // Combine and filter low stock items
+      const allStockItems = [...sizeStockItems, ...varietyStockItems];
+      const lowStock = allStockItems.filter(item => 
+        item.currentStock <= item.criticalLevel || item.currentStock === 0
+      );
       
-      setLowStockItems(stockItems);
+      setLowStockItems(lowStock);
       
       // Clear existing notifications before adding new ones
       setNotifications([]);
       
       // Add notifications for low stock and out of stock items
-      stockItems.forEach(item => {
+      lowStock.forEach(item => {
         let status = '';
         let type: 'warning' | 'error' = 'warning';
 
@@ -471,12 +474,12 @@ export default function Dashboard() {
         } else if (item.currentStock <= item.minimumStock) {
           status = 'Critical Level';
           type = 'error';
-        } else if (item.currentStock <= item.reorderPoint) {
+        } else if (item.currentStock <= item.criticalLevel) {
           status = 'Low Stock';
           type = 'warning';
         }
 
-        const message = `${status}: ${item.name} (${item.currentStock} remaining)${item.varieties.length ? ` - Varieties: ${item.varieties.join(', ')}` : ''}`;
+        const message = `${status}: ${item.type === 'size' ? 'Size' : 'Variety'} - ${item.name} (${item.currentStock} remaining)`;
         
         setNotifications(prev => [...prev, {
           message,
@@ -491,15 +494,25 @@ export default function Dashboard() {
 
   const fetchInventoryMetrics = async () => {
     try {
-      const stockRef = collection(db, "stocks");
-      const snapshot = await getDocs(stockRef);
+      const [sizeStocksSnapshot, varietyStocksSnapshot] = await Promise.all([
+        getDocs(collection(db, "sizeStocks")),
+        getDocs(collection(db, "varietyStocks"))
+      ]);
       
       let totalValue = 0;
       let totalItems = 0;
       
-      snapshot.docs.forEach(doc => {
+      // Process size stocks
+      sizeStocksSnapshot.docs.forEach(doc => {
         const data = doc.data();
-        totalValue += (data.quantity * data.price) || 0;
+        totalValue += (data.quantity * (data.price || 0)) || 0;
+        totalItems += data.quantity || 0;
+      });
+
+      // Process variety stocks
+      varietyStocksSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        totalValue += (data.quantity * (data.price || 0)) || 0;
         totalItems += data.quantity || 0;
       });
       
@@ -513,69 +526,112 @@ export default function Dashboard() {
 
   const fetchStockList = async () => {
     try {
-      const stockRef = collection(db, "stocks");
-      const snapshot = await getDocs(stockRef);
-      
-      const stocks = snapshot.docs
-        .map(doc => {
-          const data = doc.data();
-          // Only include stocks that have either a size or variety
-          if (!data.sizeName && !data.size && !data.variety && (!data.varieties || data.varieties.length === 0)) {
-            return null;
-          }
-          return {
-            id: doc.id,
-            productName: data.productName || '',
-            quantity: data.quantity || 0,
-            unit: data.unit || '',
-            supplier: data.supplier || '',
-            supplierContact: data.supplierContact || '',
-            supplierEmail: data.supplierEmail || '',
-            minimumStock: data.minimumStock || 10,
-            reorderPoint: data.reorderPoint || 20,
-            receivedDate: data.receivedDate || '',
-            lastUpdated: new Date(data.lastUpdated),
-            price: data.price || 0,
-            category: data.category || '',
-            location: data.location || '',
-            remarks: data.remarks || '',
-            size: data.sizeName || data.size || 'N/A',
-            variety: data.variety || (data.varieties && data.varieties.length > 0 ? data.varieties[0] : 'N/A'),
-            varieties: data.varieties || []
-          } as Stock;
-        })
-        .filter((stock): stock is Stock => stock !== null); // Type guard to remove null entries
+      const sizeStocksRef = collection(db, "sizeStocks");
+      const varietyStocksRef = collection(db, "varietyStocks");
+
+      const sizeStocksSnapshot = await getDocs(sizeStocksRef);
+      const varietyStocksSnapshot = await getDocs(varietyStocksRef);
+
+      const sizeStocks = sizeStocksSnapshot.docs.map(doc => {
+        const data = doc.data();
+        // Get the slices per box/tray based on size
+        const slicesConfig = {
+          'Big Bilao': 60,
+          'Half Tray': 24,
+          'Small': 30,
+          'Solo': 20,
+          'Tray': 48,
+          '1/4 Slice': 12,
+
+        };
+        
+        return {
+          id: doc.id,
+          quantity: data.slices || 0, // Read quantity from slices field
+          minimumStock: data.minimumStock || 10,
+          criticalLevel: data.criticalLevel || 20,
+          type: 'size' as const,
+          sizeName: data.size || 'N/A',
+          slicesPerUnit: slicesConfig[data.size as keyof typeof slicesConfig] || 0
+        } as Stock;
+      });
+
+      const varietyStocks = varietyStocksSnapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          productName: data.productName || '',
+          quantity: data.quantity || 0,
+          unit: data.unit || '',
+          supplier: data.supplier || '',
+          supplierContact: data.supplierContact || '',
+          supplierEmail: data.supplierEmail || '',
+          minimumStock: data.minimumStock || 10,
+          criticalLevel: data.criticalLevel || 20,
+          receivedDate: data.receivedDate || '',
+          lastUpdated: new Date(data.lastUpdated || Date.now()),
+          price: data.price || 0,
+          category: data.category || '',
+          location: data.location || '',
+          remarks: data.remarks || '',
+          size: 'N/A',
+          variety: data.variety || '',
+          totalSlices: data.slices || 0,
+          type: 'variety'
+        } as Stock;
+      });
+
+      const stocks = [...sizeStocks, ...varietyStocks];
 
       // Sort sizes in a specific order
-      const sizeOrder = ['1/4', 'Small', 'Medium', 'Large', 'XLarge', '2XL', '3XL'];
+      const sizeOrder = [ 'Small', 'Solo', 'Tray', '1/4 Slice', 'Half Tray', 'Big Bilao'];
       
-      // Sort stocks by size first, then by variety
-      const organizedStocks = stocks
-        .filter(stock => stock.quantity > 0) // Only show items with stock
-        .sort((a, b) => {
+      // Sort stocks by type first (size before variety), then by size order
+      const organizedStocks = stocks.sort((a, b) => {
+        // First sort by type
+        if (a.type !== b.type) {
+          return a.type === 'size' ? -1 : 1;
+        }
+
+        // If both are sizes, sort by size order
+        if (a.type === 'size' && b.type === 'size') {
           const indexA = sizeOrder.indexOf(a.size || '');
           const indexB = sizeOrder.indexOf(b.size || '');
           
-          // If both sizes are in the sizeOrder array
           if (indexA !== -1 && indexB !== -1) {
             return indexA - indexB;
           }
           
-          // If only one size is in the sizeOrder array
           if (indexA !== -1) return -1;
           if (indexB !== -1) return 1;
-          
-          // If neither size is in the sizeOrder array, sort alphabetically
-          if ((a.size || '') === (b.size || '')) {
-            return (a.variety || '').localeCompare(b.variety || '');
-          }
-          return (a.size || '').localeCompare(b.size || '');
-        });
+        }
+        
+        // If both are varieties or if sorting by size failed, sort alphabetically
+        return (a.variety || '').localeCompare(b.variety || '');
+      });
 
       setStockList(organizedStocks);
       
-      // Filter out of stock items from the size/variety stocks only
-      const outOfStock = stocks.filter(stock => stock.quantity === 0);
+      // Map stocks to low stock items with type assertion
+      const lowStockItems = [...sizeStocks, ...varietyStocks]
+        .filter(stock => stock.quantity <= stock.minimumStock)
+        .map(stock => ({
+          id: stock.id,
+          name: stock.type === 'size' ? stock.sizeName || 'N/A' : stock.productName || 'N/A',
+          currentStock: stock.quantity,
+          minimumStock: stock.minimumStock,
+          criticalLevel: stock.criticalLevel,
+          type: stock.type,
+          severity: stock.quantity <= stock.criticalLevel ? 'critical' : 'low',
+          varieties: []
+        } as LowStockItem));
+
+      setLowStockItems(lowStockItems);
+      
+      // Update out of stock items
+      const outOfStock = organizedStocks.filter(stock => 
+        stock.type === 'size' ? stock.quantity === 0 : stock.totalSlices === 0
+      );
       setOutOfStockItems(outOfStock);
     } catch (error) {
       console.error("Error fetching stock list:", error);
@@ -957,7 +1013,7 @@ export default function Dashboard() {
                       {lowStockItems.filter(item => item.currentStock === 0).length} Out of Stock
                     </span>
                     <span className="px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
-                      {lowStockItems.filter(item => item.currentStock > 0 && item.currentStock <= item.reorderPoint).length} Low Stock
+                      {lowStockItems.filter(item => item.currentStock > 0 && item.currentStock <= item.criticalLevel).length} Low Stock
                     </span>
                   </div>
                 </div>
@@ -982,7 +1038,7 @@ export default function Dashboard() {
                       <tr key={item.id} className="hover:bg-gray-50">
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="text-sm font-medium text-gray-900">{item.name}</div>
-                          {item.varieties.length > 0 && (
+                          {item.varieties && item.varieties.length > 0 && (
                             <div className="text-xs text-gray-500 mt-1">
                               Varieties: {item.varieties.join(', ')}
                             </div>
@@ -1016,69 +1072,130 @@ export default function Dashboard() {
             <div className="p-6 border-b border-gray-100">
               <div className="flex items-center justify-between">
                 <h3 className="text-base font-semibold text-gray-900">Stock List</h3>
-                <button
-                  onClick={() => router.push('/inventory/stock-management')}
-                  className="text-sm text-blue-600 hover:text-blue-700"
-                >
-                  View All
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => router.push('/inventory/stock-management')}
+                    className="text-sm text-blue-600 hover:text-blue-700"
+                  >
+                    View All
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Size
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Variety
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Quantity
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {stockList.map((stock) => (
-                    <tr key={stock.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">
-                          {stock.size}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900">
-                          {stock.variety}
-                        </div>
-                        {stock.varieties && stock.varieties.length > 1 && (
-                          <div className="text-xs text-gray-500 mt-1">
-                            +{stock.varieties.length - 1} more varieties
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900">{stock.quantity}</div>
-                        <div className="text-xs text-gray-500">Min: {stock.minimumStock}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                          stock.quantity <= stock.minimumStock ? 'bg-red-100 text-red-800' :
-                          stock.quantity <= stock.reorderPoint ? 'bg-yellow-100 text-yellow-800' :
-                          'bg-green-100 text-green-800'
-                        }`}>
-                          {stock.quantity <= stock.minimumStock ? 'Critical' :
-                           stock.quantity <= stock.reorderPoint ? 'Low Stock' :
-                           'In Stock'}
-                        </span>
-                      </td>
+            
+            {/* Size Stocks */}
+            <div className="mb-4">
+              <div className="px-6 py-3 bg-gray-50">
+                <h4 className="text-sm font-semibold text-gray-700">Sizes</h4>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Size
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Stock Level
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {stockList
+                      .filter(stock => stock.type === 'size')
+                      .map((stock) => (
+                        <tr key={stock.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm font-medium text-gray-900">
+                              {stock.sizeName}
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              {stock.slicesPerUnit} slices per box/tray
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">
+                              {stock.quantity} boxes/trays
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              Min: {stock.minimumStock} boxes | Critical: {stock.criticalLevel} boxes
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                              stock.quantity <= stock.minimumStock ? 'bg-red-100 text-red-800' :
+                              stock.quantity <= stock.criticalLevel ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-green-100 text-green-800'
+                            }`}>
+                              {stock.quantity <= stock.minimumStock ? 'Critical' :
+                               stock.quantity <= stock.criticalLevel ? 'Low Stock' :
+                               'In Stock'}
+                            </span>
+                          </td>
+                        </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Variety Stocks */}
+            <div>
+              <div className="px-6 py-3 bg-gray-50 border-t border-gray-200">
+                <h4 className="text-sm font-semibold text-gray-700">Varieties</h4>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Variety
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Slices
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {stockList
+                      .filter(stock => stock.type === 'variety')
+                      .map((stock) => (
+                        <tr key={stock.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm font-medium text-gray-900">
+                              {stock.variety}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">
+                              {stock.totalSlices || 0} slices
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              Min: {stock.minimumStock} | Critical: {stock.criticalLevel}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                              stock.totalSlices <= stock.minimumStock ? 'bg-red-100 text-red-800' :
+                              stock.totalSlices <= stock.criticalLevel ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-green-100 text-green-800'
+                            }`}>
+                              {stock.totalSlices <= stock.minimumStock ? 'Critical' :
+                               stock.totalSlices <= stock.criticalLevel ? 'Low Stock' :
+                               'In Stock'}
+                            </span>
+                          </td>
+                        </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>

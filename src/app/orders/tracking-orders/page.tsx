@@ -18,9 +18,13 @@ import {
   where,
   runTransaction,
   Timestamp,
-  FieldValue
+  FieldValue,
+  DocumentData
 } from "firebase/firestore";
 import Sidebar from "@/app/components/Sidebar";
+
+// Import size configurations
+import { Size, sizeConfigs } from "@/app/constants/sizeConfigs";
 
 // Add the VARIETIES constant at the top level
 const VARIETIES = [
@@ -31,9 +35,35 @@ const VARIETIES = [
     'Cassava'
 ] as const;
 
+interface Size {
+    id: string;
+    name: string;
+    price: number;
+    maxVarieties: number;
+    minVarieties: number;
+    totalSlices: number;
+    allowedVarieties?: string[];
+    excludedVarieties?: string[];
+    boxPrice?: number;
+    description: string;
+}
+
+interface StockUpdate {
+    ref: DocumentReference;
+    data: DocumentData & {
+        slices: number;
+        variety?: string;
+        size?: string;
+    };
+    quantity: number;
+    variety?: string;
+    size?: string;
+    isSize: boolean;
+}
+
 interface VarietyCombination {
-  varieties: string[];
-  quantity: number;
+    varieties: string[];
+    quantity: number;
 }
 
 interface StockData {
@@ -252,8 +282,7 @@ export default function TrackingOrders() {
 
       await runTransaction(db, async (transaction) => {
         // STEP 1: Perform all reads first
-        const stockUpdates = [];
-        const historyUpdates = [];
+        const stockUpdates: StockUpdate[] = [];
         
         // Read tracking order document
         const trackingOrdersRef = collection(db, "tracking_orders");
@@ -272,9 +301,51 @@ export default function TrackingOrders() {
         if (newStatus === "Ready for Pickup") {
           // Read all necessary stock documents first
           for (const item of order.items) {
-            const stocksRef = collection(db, "stocks");
+            // Normalize the size name to match sizeConfigs format
+            const normalizedSize = item.productSize.replace(/-/g, ' ').trim();
+            
+            // Check size stock first
+            const sizeStocksRef = collection(db, "sizeStocks");
+            const sizeStockQuery = query(
+              sizeStocksRef,
+              where("type", "==", "size"),
+              where("size", "==", normalizedSize)
+            );
+            const sizeSnapshot = await getDocs(sizeStockQuery);
+            const sizeStock = sizeSnapshot.docs[0];
+
+            if (!sizeStock) {
+              // Double check with sizeConfigs to provide better error message
+              const validSize = sizeConfigs.find(s => s.name.toLowerCase() === normalizedSize.toLowerCase());
+              if (validSize) {
+                throw new Error(`No stock found for size: ${validSize.name}. Please add stock for this size in Stock Management.`);
+              } else {
+                throw new Error(`Invalid size: ${item.productSize}. This size is not configured in the system.`);
+              }
+            }
+
+            const sizeStockData = sizeStock.data();
+            if (sizeStockData.slices < item.productQuantity) {
+              throw new Error(`Insufficient ${normalizedSize} stock. Available: ${sizeStockData.slices}, Needed: ${item.productQuantity}`);
+            }
+
+            // Get size configuration for slice calculation
+            const sizeConfig = sizeConfigs.find(size => 
+              size.name.toLowerCase() === normalizedSize.toLowerCase()
+            );
+            
+            if (!sizeConfig) {
+              throw new Error(`Size configuration not found for ${normalizedSize}. Available sizes: ${sizeConfigs.map(s => s.name).join(', ')}`);
+            }
+
+            // Calculate slices needed per variety
+            const slicesPerVariety = Math.floor(sizeConfig.totalSlices / item.productVarieties.length);
+            const totalSlicesNeeded = slicesPerVariety * item.productQuantity;
+
+            // Check variety stocks
+            const varietyStocksRef = collection(db, "varietyStocks");
             const varietyStockQuery = query(
-              stocksRef,
+              varietyStocksRef,
               where("type", "==", "variety")
             );
             const varietySnapshot = await getDocs(varietyStockQuery);
@@ -291,7 +362,7 @@ export default function TrackingOrders() {
 
               const varietyStock = varietySnapshot.docs.find(doc => {
                 const data = doc.data();
-                return data.variety.toLowerCase() === correctVariety.toLowerCase();
+                return data.variety?.toLowerCase() === correctVariety.toLowerCase();
               });
 
               if (!varietyStock) {
@@ -299,18 +370,28 @@ export default function TrackingOrders() {
               }
 
               const varietyData = varietyStock.data();
-              if (varietyData.quantity < item.productQuantity) {
-                throw new Error(`Insufficient stock for variety: ${varietyData.variety}`);
+              if (varietyData.slices < totalSlicesNeeded) {
+                throw new Error(`Insufficient slices for variety: ${varietyData.variety}. Available: ${varietyData.slices}, Needed: ${totalSlicesNeeded}`);
               }
 
               // Store the update information for later
               stockUpdates.push({
                 ref: varietyStock.ref,
                 data: varietyData,
-                quantity: item.productQuantity,
-                variety: correctVariety
+                quantity: totalSlicesNeeded,
+                variety: correctVariety,
+                isSize: false
               });
             }
+
+            // Store size stock update
+            stockUpdates.push({
+              ref: sizeStock.ref,
+              data: sizeStockData,
+              quantity: item.productQuantity,
+              size: item.productSize,
+              isSize: true
+            });
           }
         }
 
@@ -318,29 +399,55 @@ export default function TrackingOrders() {
         if (newStatus === "Ready for Pickup") {
           // Update all stocks
           for (const update of stockUpdates) {
-            const newQuantity = update.data.quantity - update.quantity;
-            
-            // Update stock
-            transaction.update(update.ref, {
-              quantity: newQuantity,
-              lastUpdated: new Date().toISOString()
-            });
+            if (update.isSize) {
+              // Update size stock
+              const newQuantity = update.data.slices - update.quantity;
+              
+              transaction.update(update.ref, {
+                slices: newQuantity,
+                lastUpdated: new Date().toISOString()
+              });
 
-            // Create stock history record
-            const historyRef = doc(collection(db, "stockHistory"));
-            transaction.set(historyRef, {
-              stockId: update.ref.id,
-              size: "",
-              variety: update.variety,
-              type: "out",
-              quantity: update.quantity,
-              previousQuantity: update.data.quantity,
-              newQuantity: newQuantity,
-              date: new Date(),
-              updatedBy: "Order System",
-              remarks: `Order ${orderId} ready for pickup`,
-              isDeleted: false
-            });
+              // Create size stock history record
+              const historyRef = doc(collection(db, "stockHistory"));
+              transaction.set(historyRef, {
+                stockId: update.ref.id,
+                size: update.size,
+                variety: "",
+                type: "out",
+                slices: update.quantity,
+                previousSlices: update.data.slices,
+                newSlices: newQuantity,
+                date: new Date(),
+                updatedBy: "Order System",
+                remarks: `Order ${orderId} ready for pickup - Deducted ${update.quantity} ${update.size}`,
+                isDeleted: false
+              });
+            } else {
+              // Update variety stock
+              const newQuantity = update.data.slices - update.quantity;
+              
+              transaction.update(update.ref, {
+                slices: newQuantity,
+                lastUpdated: new Date().toISOString()
+              });
+
+              // Create variety stock history record
+              const historyRef = doc(collection(db, "stockHistory"));
+              transaction.set(historyRef, {
+                stockId: update.ref.id,
+                size: "",
+                variety: update.variety,
+                type: "out",
+                slices: update.quantity,
+                previousSlices: update.data.slices,
+                newSlices: newQuantity,
+                date: new Date(),
+                updatedBy: "Order System",
+                remarks: `Order ${orderId} ready for pickup - Deducted ${update.quantity} slices`,
+                isDeleted: false
+              });
+            }
           }
         }
 

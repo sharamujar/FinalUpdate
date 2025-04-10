@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { addDoc, collection, getDocs, updateDoc, doc, deleteDoc, query, orderBy, where, limit } from "firebase/firestore";
+import { addDoc, collection, getDocs, updateDoc, doc, deleteDoc, query, orderBy, where, limit, getDoc } from "firebase/firestore";
 import { db } from "../../firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
 import { Line } from 'react-chartjs-2';
@@ -52,6 +52,7 @@ const sizeConfigs: Size[] = [
         price: 520.00,
         maxVarieties: 4,
         minVarieties: 1,
+        totalSlices: 60,
         excludedVarieties: ['Cassava'],
         description: 'Can have up to 4 varieties (no Cassava)'
     },
@@ -61,6 +62,7 @@ const sizeConfigs: Size[] = [
         price: 420.00,
         maxVarieties: 4,
         minVarieties: 1,
+        totalSlices: 48,
         description: 'Can have up to 4 varieties'
     },
     {
@@ -69,6 +71,7 @@ const sizeConfigs: Size[] = [
         price: 280.00,
         maxVarieties: 1,
         minVarieties: 1,
+        totalSlices: 30,
         allowedVarieties: ['Bibingka'],
         description: 'Bibingka only'
     },
@@ -78,6 +81,7 @@ const sizeConfigs: Size[] = [
         price: 240.00,
         maxVarieties: 2,
         minVarieties: 1,
+        totalSlices: 24,
         description: 'Can have up to 2 varieties'
     },
     {
@@ -86,6 +90,7 @@ const sizeConfigs: Size[] = [
         price: 200.00,
         maxVarieties: 1,
         minVarieties: 1,
+        totalSlices: 20,
         allowedVarieties: ['Bibingka'],
         description: 'Bibingka only'
     },
@@ -95,6 +100,7 @@ const sizeConfigs: Size[] = [
         price: 140.00,
         maxVarieties: 5,
         minVarieties: 1,
+        totalSlices: 12,
         boxPrice: 140.00,
         description: 'Can have up to 5 varieties'
     }
@@ -111,6 +117,7 @@ interface Size {
     price: number;
     maxVarieties: number;
     minVarieties: number;
+    totalSlices: number;
     allowedVarieties?: string[];
     excludedVarieties?: string[];
     boxPrice?: number;
@@ -122,9 +129,12 @@ interface Stock {
     type: 'size' | 'variety';
     size: string;
     variety?: string;
-    quantity: number;
+    slices: number;
     minimumStock: number;
-    reorderPoint: number;
+    criticalLevel: number;
+    minimumSlices?: number;
+    criticalSlices?: number;
+    totalSlices?: number;
     combinations?: VarietyCombination[];
     productionDate?: string;
     expiryDate?: string;
@@ -137,9 +147,9 @@ interface StockHistory {
     size: string;
     variety: string;
     type: 'in' | 'out' | 'adjustment' | 'deleted';
-    quantity: number;
-    previousQuantity: number;
-    newQuantity: number;
+    slices: number;
+    previousSlices: number;
+    newSlices: number;
     date: Date;
     updatedBy: string;
     remarks: string;
@@ -167,43 +177,67 @@ interface OrderDetails {
 // Move the function outside and before the Stock component
 export const updateStockOnOrderStatus = async (orderDetails: OrderDetails) => {
     try {
-        const stocksRef = collection(db, "stocks");
-        const stocksSnapshot = await getDocs(stocksRef);
-        const stocks = stocksSnapshot.docs.map(doc => ({
+        // Get the size configuration for the order
+        const sizeConfig = sizeConfigs.find(size => size.name === orderDetails.size);
+        if (!sizeConfig) {
+            throw new Error(`Size configuration not found for ${orderDetails.size}`);
+        }
+
+        // Calculate slices per variety
+        const slicesPerVariety = Math.floor(sizeConfig.totalSlices / orderDetails.varieties.length);
+
+        // Fetch size stocks
+        const sizeStocksRef = collection(db, "sizeStocks");
+        const sizeStocksSnapshot = await getDocs(sizeStocksRef);
+        const sizeStocks = sizeStocksSnapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data()
         })) as Stock[];
 
-        // Find the matching size-based stock
-        const sizeStock = stocks.find(stock => 
+        // Find matching size stock
+        const sizeStock = sizeStocks.find(stock => 
             stock.type === 'size' && 
             stock.size === orderDetails.size
         );
 
-        // Find matching variety-based stocks
-        const varietyStocks = stocks.filter(stock => 
-            stock.type === 'variety' && 
-            orderDetails.varieties.includes(stock.variety || '')
-        );
-
-        // Validate stock availability
         if (!sizeStock) {
             throw new Error(`Size stock not available for ${orderDetails.size}`);
         }
 
+        if (sizeStock.slices < orderDetails.quantity) {
+            throw new Error(`Insufficient ${orderDetails.size} stock. Available: ${sizeStock.slices}, Needed: ${orderDetails.quantity}`);
+        }
+
+        // Fetch variety stocks
+        const varietyStocksRef = collection(db, "varietyStocks");
+        const varietyStocksSnapshot = await getDocs(varietyStocksRef);
+        const varietyStocks = varietyStocksSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        })) as Stock[];
+
+        // Find matching variety stocks
+        const matchingVarietyStocks = varietyStocks.filter(stock => 
+            stock.type === 'variety' && 
+            orderDetails.varieties.includes(stock.variety || '')
+        );
+
         // Check if we have all required variety stocks
         const missingVarieties = orderDetails.varieties.filter(v => 
-            !varietyStocks.some(stock => stock.variety === v)
+            !matchingVarietyStocks.some(stock => stock.variety === v)
         );
 
         if (missingVarieties.length > 0) {
             throw new Error(`Variety stocks not available for: ${missingVarieties.join(', ')}`);
         }
 
-        // Check quantities
-        for (const varietyStock of varietyStocks) {
-            if ((varietyStock.quantity || 0) < orderDetails.quantity) {
-                throw new Error(`Insufficient stock for variety: ${varietyStock.variety}`);
+        // Calculate total slices needed per variety
+        const slicesNeededPerVariety = slicesPerVariety * orderDetails.quantity;
+
+        // Check if each variety has enough slices
+        for (const varietyStock of matchingVarietyStocks) {
+            if ((varietyStock.slices || 0) < slicesNeededPerVariety) {
+                throw new Error(`Insufficient slices for variety: ${varietyStock.variety}. Available: ${varietyStock.slices}, Needed: ${slicesNeededPerVariety}`);
             }
         }
 
@@ -211,56 +245,54 @@ export const updateStockOnOrderStatus = async (orderDetails: OrderDetails) => {
         const updates = [];
 
         // Update size stock
-        if (sizeStock) {
-            const newSizeQuantity = sizeStock.quantity - orderDetails.quantity;
-            updates.push(updateDoc(doc(db, "stocks", sizeStock.id), {
-                quantity: newSizeQuantity,
-                lastUpdated: new Date().toISOString()
-            }));
+        const newSizeQuantity = sizeStock.slices - orderDetails.quantity;
+        updates.push(updateDoc(doc(db, "sizeStocks", sizeStock.id), {
+            slices: newSizeQuantity,
+            lastUpdated: new Date().toISOString()
+        }));
 
-            // Record in stock history
-            updates.push(addDoc(collection(db, "stockHistory"), {
-                stockId: sizeStock.id,
-                size: sizeStock.size,
-                variety: '',
+        // Record size stock history
+        updates.push(addDoc(collection(db, "stockHistory"), {
+            stockId: sizeStock.id,
+            size: sizeStock.size,
+            variety: '',
             type: 'out',
-            quantity: orderDetails.quantity,
-                previousQuantity: sizeStock.quantity,
-                newQuantity: newSizeQuantity,
+            slices: orderDetails.quantity,
+            previousSlices: sizeStock.slices,
+            newSlices: newSizeQuantity,
             date: new Date(),
             updatedBy: "Order System",
-                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
+            remarks: `Order pickup - Order ID: ${orderDetails.orderId} - Deducted ${orderDetails.quantity} ${orderDetails.size}`,
             isDeleted: false
-            }));
-        }
+        }));
 
         // Update variety stocks
-        for (const varietyStock of varietyStocks) {
-            const newVarietyQuantity = (varietyStock.quantity || 0) - orderDetails.quantity;
+        for (const varietyStock of matchingVarietyStocks) {
+            const newVarietySlices = (varietyStock.slices || 0) - slicesNeededPerVariety;
             
-            updates.push(updateDoc(doc(db, "stocks", varietyStock.id), {
-                quantity: newVarietyQuantity,
+            updates.push(updateDoc(doc(db, "varietyStocks", varietyStock.id), {
+                slices: newVarietySlices,
                 lastUpdated: new Date().toISOString()
             }));
 
-            // Record in stock history
+            // Record variety stock history
             updates.push(addDoc(collection(db, "stockHistory"), {
                 stockId: varietyStock.id,
-                size: '',
+                size: orderDetails.size,
                 variety: varietyStock.variety,
                 type: 'out',
-                quantity: orderDetails.quantity,
-                previousQuantity: varietyStock.quantity || 0,
-                newQuantity: newVarietyQuantity,
+                slices: slicesNeededPerVariety,
+                previousSlices: varietyStock.slices || 0,
+                newSlices: newVarietySlices,
                 date: new Date(),
                 updatedBy: "Order System",
-                remarks: `Order placed - Order ID: ${orderDetails.orderId}`,
+                remarks: `Order pickup - Order ID: ${orderDetails.orderId} - Deducted ${slicesNeededPerVariety} slices`,
                 isDeleted: false
             }));
 
-            // Check if reorder point reached
-            if (newVarietyQuantity <= (varietyStock.reorderPoint || 0)) {
-                console.log(`Reorder point reached for variety: ${varietyStock.variety}`);
+            // Check if critical level reached
+            if (newVarietySlices <= (varietyStock.criticalLevel || 0)) {
+                console.log(`Critical level reached for variety: ${varietyStock.variety}`);
                 // You can implement additional notification logic here
             }
         }
@@ -300,9 +332,9 @@ export default function Stock() {
         id: '',
         type: 'size',
         size: '',
-        quantity: 0,
+        slices: 0,
         minimumStock: 0,
-        reorderPoint: 0,
+        criticalLevel: 0,
         lastUpdated: new Date().toISOString()
     });
 
@@ -311,9 +343,9 @@ export default function Stock() {
         type: 'variety',
         size: '',
         variety: '',
-        quantity: 0,
+        slices: 0,
         minimumStock: 0,
-        reorderPoint: 0,
+        criticalLevel: 0,
         productionDate: '',
         expiryDate: '',
         lastUpdated: new Date().toISOString()
@@ -361,13 +393,24 @@ export default function Stock() {
 
     const fetchStocks = async () => {
         try {
-            const querySnapshot = await getDocs(collection(db, "stocks"));
-            const stockList = querySnapshot.docs.map(doc => ({
+            // Fetch size stocks
+            const sizeStocksSnapshot = await getDocs(collection(db, "sizeStocks"));
+            const sizeStocksList = sizeStocksSnapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data()
-            })) as Stock[];
-            setStocks(stockList);
-            updateStockChart(stockList);
+            }));
+
+            // Fetch variety stocks
+            const varietyStocksSnapshot = await getDocs(collection(db, "varietyStocks"));
+            const varietyStocksList = varietyStocksSnapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+
+            // Combine both lists
+            const combinedStocks = [...sizeStocksList, ...varietyStocksList] as Stock[];
+            setStocks(combinedStocks);
+            updateStockChart(combinedStocks);
         } catch (error) {
             console.error("Error fetching stocks:", error);
         }
@@ -428,7 +471,7 @@ export default function Stock() {
         const labels: string[] = [];
         const quantities: number[] = [];
         const minimums: number[] = [];
-        const reorderPoints: number[] = [];
+        const criticalLevels: number[] = [];
 
         stockData.forEach(stock => {
             if (stock.type === 'size' && stock.combinations && stock.combinations.length > 0) {
@@ -439,15 +482,15 @@ export default function Stock() {
                     labels.push(label);
                     quantities.push(combo.quantity);
                     minimums.push(stock.minimumStock);
-                    reorderPoints.push(stock.reorderPoint);
+                    criticalLevels.push(stock.criticalLevel);
                 });
             } else {
                 // For regular stocks
                 const label = stock.variety ? `${stock.size} - ${stock.variety}` : stock.size;
                 labels.push(label);
-                quantities.push(stock.quantity);
+                quantities.push(stock.slices);
                 minimums.push(stock.minimumStock);
-                reorderPoints.push(stock.reorderPoint);
+                criticalLevels.push(stock.criticalLevel);
             }
         });
 
@@ -469,8 +512,8 @@ export default function Stock() {
                     tension: 0.1
                 },
                 {
-                    label: 'Reorder Point',
-                    data: reorderPoints,
+                    label: 'Critical Level',
+                    data: criticalLevels,
                     borderColor: 'rgb(255, 205, 86)',
                     backgroundColor: 'rgba(255, 205, 86, 0.5)',
                     tension: 0.1
@@ -479,67 +522,106 @@ export default function Stock() {
         });
     };
 
-    const handleSubmit = async (e: React.FormEvent, type: 'size' | 'variety') => {
+    const handleSubmitSizeStock = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
 
         try {
-            if (type === 'size') {
-                // Validation for size-based stock
-                if (!sizeStock.size || sizeStock.quantity <= 0) {
-                    alert("Please select a size and enter a valid quantity");
+            if (!sizeStock.size || sizeStock.slices <= 0) {
+                alert("Please select a size and enter a valid number of boxes/trays");
                 setLoading(false);
                 return;
             }
 
-                const newStockData = {
-                    type: 'size',
-                    size: sizeStock.size,
-                    variety: '', // Empty for size-based stock
-                    quantity: sizeStock.quantity,
-                    minimumStock: 0, // Default values for size-based stock
-                    reorderPoint: 0,
-                    productionDate: new Date().toISOString().split('T')[0],
-                    expiryDate: new Date().toISOString().split('T')[0],
-                    lastUpdated: new Date().toISOString()
-                };
-
-                const docRef = await addDoc(collection(db, "stocks"), newStockData);
-                await updateDoc(docRef, { id: docRef.id });
-
-                await addDoc(collection(db, "stockHistory"), {
-                    stockId: docRef.id,
-                    size: sizeStock.size,
-                    variety: '',
-                    type: 'in',
-                    quantity: sizeStock.quantity,
-                    previousQuantity: 0,
-                    newQuantity: sizeStock.quantity,
-                    date: new Date(),
-                    updatedBy: "Admin",
-                    remarks: "Initial size stock entry",
-                    isDeleted: false
-                });
-
-                alert("Size stock added successfully!");
-            } else {
-                // Validation for variety-based stock
-                if (!varietyStock.variety || varietyStock.quantity <= 0) {
-                    alert("Please select a variety and enter a valid quantity");
+            if (sizeStock.minimumStock <= 0 || sizeStock.criticalLevel <= 0) {
+                alert("Please enter valid low stock and critical level values");
                 setLoading(false);
                 return;
             }
 
-                // Check dates for variety-based stock
-                if (!varietyStock.productionDate || !varietyStock.expiryDate) {
+            if (sizeStock.criticalLevel >= sizeStock.minimumStock) {
+                alert("Critical level should be lower than the low stock level");
+                setLoading(false);
+                return;
+            }
+
+            const sizeConfig = sizeConfigs.find(s => s.name === sizeStock.size);
+            if (!sizeConfig) {
+                alert("Size configuration not found");
+                setLoading(false);
+                return;
+            }
+
+            const totalSlices = sizeStock.slices * sizeConfig.totalSlices;
+
+            const newStockData = {
+                type: 'size',
+                size: sizeStock.size,
+                slices: sizeStock.slices,
+                totalSlices: totalSlices,
+                minimumStock: sizeStock.minimumStock,
+                criticalLevel: sizeStock.criticalLevel,
+                lastUpdated: new Date().toISOString()
+            };
+
+            const docRef = await addDoc(collection(db, "sizeStocks"), newStockData);
+            await updateDoc(doc(db, "sizeStocks", docRef.id), { id: docRef.id });
+
+            await addDoc(collection(db, "stockHistory"), {
+                stockId: docRef.id,
+                size: sizeStock.size,
+                variety: '',
+                type: 'in',
+                slices: totalSlices,
+                previousSlices: 0,
+                newSlices: totalSlices,
+                date: new Date(),
+                updatedBy: "Admin",
+                remarks: `Added ${sizeStock.slices} ${sizeStock.size} (${totalSlices} slices total)`,
+                isDeleted: false
+            });
+
+            alert("Size stock added successfully!");
+            setSizeStock({
+                id: '',
+                type: 'size',
+                size: '',
+                slices: 0,
+                minimumStock: 0,
+                criticalLevel: 0,
+                lastUpdated: new Date().toISOString()
+            });
+            
+            await fetchStocks();
+            await fetchStockHistory();
+        } catch (error) {
+            console.error("Error handling size stock:", error);
+            alert("Failed to add size stock. Please try again later.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleSubmitVarietyStock = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+
+        try {
+            if (!varietyStock.variety || varietyStock.slices <= 0) {
+                alert("Please select a variety and enter a valid number of slices");
+                setLoading(false);
+                return;
+            }
+
+            if (!varietyStock.productionDate || !varietyStock.expiryDate) {
                 alert("Please set both production and expiry dates");
                 setLoading(false);
                 return;
             }
 
-                const expiryDate = new Date(varietyStock.expiryDate);
-                const productionDate = new Date(varietyStock.productionDate);
-                const currentDate = new Date();
+            const expiryDate = new Date(varietyStock.expiryDate);
+            const productionDate = new Date(varietyStock.productionDate);
+            const currentDate = new Date();
 
             if (expiryDate <= productionDate) {
                 alert("Expiry date must be after production date");
@@ -555,37 +637,47 @@ export default function Stock() {
             }
 
             const newStockData = {
-                    ...varietyStock,
-                    type: 'variety',
-                    size: '', // Empty for variety-based stock
-                    lastUpdated: new Date().toISOString()
-                };
+                ...varietyStock,
+                type: 'variety',
+                lastUpdated: new Date().toISOString()
+            };
 
-                const docRef = await addDoc(collection(db, "stocks"), newStockData);
-                await updateDoc(docRef, { id: docRef.id });
+            const docRef = await addDoc(collection(db, "varietyStocks"), newStockData);
+            await updateDoc(doc(db, "varietyStocks", docRef.id), { id: docRef.id });
 
-                await addDoc(collection(db, "stockHistory"), {
-                    stockId: docRef.id,
-                    size: '',
-                    variety: varietyStock.variety,
-                    type: 'in',
-                    quantity: varietyStock.quantity,
-                    previousQuantity: 0,
-                    newQuantity: varietyStock.quantity,
-                    date: new Date(),
-                    updatedBy: "Admin",
-                    remarks: "Initial variety stock entry",
-                    isDeleted: false
-                });
+            await addDoc(collection(db, "stockHistory"), {
+                stockId: docRef.id,
+                size: '',
+                variety: varietyStock.variety,
+                type: 'in',
+                slices: varietyStock.slices,
+                previousSlices: 0,
+                newSlices: varietyStock.slices,
+                date: new Date(),
+                updatedBy: "Admin",
+                remarks: `Added ${varietyStock.slices} slices of ${varietyStock.variety}`,
+                isDeleted: false
+            });
 
-                alert("Variety stock added successfully!");
-            }
+            alert("Variety stock added successfully!");
+            setVarietyStock({
+                id: '',
+                type: 'variety',
+                size: '',
+                variety: '',
+                slices: 0,
+                minimumStock: 0,
+                criticalLevel: 0,
+                productionDate: '',
+                expiryDate: '',
+                lastUpdated: new Date().toISOString()
+            });
 
-            resetForm();
-            await Promise.all([fetchStocks(), fetchStockHistory()]);
+            await fetchStocks();
+            await fetchStockHistory();
         } catch (error) {
-            console.error("Error handling stock:", error);
-            alert("Failed to process stock. Please try again later.");
+            console.error("Error handling variety stock:", error);
+            alert("Failed to add variety stock. Please try again later.");
         } finally {
             setLoading(false);
         }
@@ -601,8 +693,8 @@ export default function Stock() {
                 return;
             }
 
-            const newQuantity = currentStock.quantity + adjustment;
-            if (newQuantity < 0) {
+            const newSlices = currentStock.slices + adjustment;
+            if (newSlices < 0) {
                 alert("Stock cannot be negative!");
                 return;
             }
@@ -610,7 +702,7 @@ export default function Stock() {
             const timestamp = new Date();
             
             await updateDoc(stockRef, {
-                quantity: newQuantity,
+                slices: newSlices,
                 lastUpdated: timestamp.toISOString()
             });
 
@@ -619,12 +711,12 @@ export default function Stock() {
                 size: currentStock.size,
                 variety: currentStock.variety,
                 type: adjustment > 0 ? 'in' : 'out',
-                quantity: Math.abs(adjustment),
-                previousQuantity: currentStock.quantity,
-                newQuantity: newQuantity,
+                slices: Math.abs(adjustment),
+                previousSlices: currentStock.slices,
+                newSlices: newSlices,
                 date: timestamp,
                 updatedBy: "Admin",
-                remarks: `Stock ${adjustment > 0 ? 'added' : 'removed'}: ${Math.abs(adjustment)} units`,
+                remarks: `Stock ${adjustment > 0 ? 'added' : 'removed'}: ${Math.abs(adjustment)} slices`,
                 isDeleted: false
             });
 
@@ -636,37 +728,41 @@ export default function Stock() {
         }
     };
 
-    const handleDelete = async (id: string) => {
+    const handleDelete = async (id: string, type: 'size' | 'variety') => {
         if (!confirm("Are you sure you want to delete this stock?")) {
             return;
         }
 
         try {
-            const stockRef = doc(db, "stocks", id);
-            const currentStock = stocks.find(s => s.id === id);
+            const collectionName = type === 'size' ? "sizeStocks" : "varietyStocks";
+            const stockRef = doc(db, collectionName, id);
+            const stockDoc = await getDoc(stockRef);
             
-            if (!currentStock) {
+            if (!stockDoc.exists()) {
                 alert("Stock not found!");
                 return;
             }
+
+            const stockData = stockDoc.data();
 
             await deleteDoc(stockRef);
 
             await addDoc(collection(db, "stockHistory"), {
                 stockId: id,
-                size: currentStock.size,
-                variety: currentStock.variety,
+                size: type === 'size' ? stockData.size : '',
+                variety: type === 'variety' ? stockData.variety : '',
                 type: 'deleted',
-                quantity: currentStock.quantity,
-                previousQuantity: currentStock.quantity,
-                newQuantity: 0,
+                slices: stockData.slices,
+                previousSlices: stockData.slices,
+                newSlices: 0,
                 date: new Date(),
                 updatedBy: "Admin",
-                remarks: "Stock deleted",
+                remarks: `${type === 'size' ? 'Size' : 'Variety'} stock deleted`,
                 isDeleted: true
             });
 
-            await Promise.all([fetchStocks(), fetchStockHistory()]);
+            await fetchStocks();
+            await fetchStockHistory();
             alert("Stock deleted successfully!");
         } catch (error) {
             console.error("Error deleting stock:", error);
@@ -679,9 +775,9 @@ export default function Stock() {
             id: '',
             type: 'size',
             size: '',
-            quantity: 0,
+            slices: 0,
             minimumStock: 0,
-            reorderPoint: 0,
+            criticalLevel: 0,
             lastUpdated: new Date().toISOString()
         });
         setVarietyStock({
@@ -689,9 +785,9 @@ export default function Stock() {
             type: 'variety',
             size: '',
             variety: '',
-            quantity: 0,
+            slices: 0,
             minimumStock: 0,
-            reorderPoint: 0,
+            criticalLevel: 0,
             productionDate: '',
             expiryDate: '',
             lastUpdated: new Date().toISOString()
@@ -711,7 +807,7 @@ export default function Stock() {
     const filteredStocks = stocks
         .filter(s => filterType === 'all' || s.type === filterType)
         .filter(s => filterCategory === 'all' || s.size === filterCategory)
-        .filter(s => showLowStock ? s.quantity <= s.minimumStock : true)
+        .filter(s => showLowStock ? s.slices <= s.minimumStock : true)
         .filter(s => !searchTerm || (s.variety?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()));
 
     const chartOptions = {
@@ -783,12 +879,12 @@ export default function Stock() {
 
         setSizeStock(prev => {
             const newCombinations = [...(prev.combinations ?? []), currentCombination];
-            const newTotalQuantity = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
+            const newTotalSlices = newCombinations.reduce((sum, c) => sum + c.quantity, 0);
             
             return {
                 ...prev,
                 combinations: newCombinations,
-                quantity: newTotalQuantity
+                slices: newTotalSlices
             };
         });
 
@@ -912,35 +1008,72 @@ export default function Stock() {
                 {/* Size-based Stock Form */}
                 <div className="mb-8 p-4 bg-gray-50 rounded">
                     <h3 className="text-lg font-semibold mb-4">Add Size Stock</h3>
-                    <form onSubmit={(e) => handleSubmit(e, 'size')} className="space-y-4">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
+                    <form onSubmit={handleSubmitSizeStock} className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
                                 <label className="block text-sm font-medium mb-2">Select Size</label>
-                                    <select
-                                        className="w-full p-2 border rounded"
+                                <select
+                                    className="w-full p-2 border rounded"
                                     value={sizeStock.size}
                                     onChange={(e) => setSizeStock(prev => ({ ...prev, size: e.target.value }))}
                                     required
                                 >
                                     <option value="">Select Size...</option>
-                                    {sizes.map(size => (
-                                        <option key={size.id} value={size.name}>{size.name}</option>
-                                        ))}
-                                    </select>
-                                </div>
+                                    {sizeConfigs.map(size => (
+                                        <option key={size.id} value={size.name}>
+                                            {size.name} ({size.totalSlices} slices)
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
 
-                                <div>
-                                    <label className="block text-sm font-medium mb-2">Quantity</label>
-                                    <input
-                                        type="number"
-                                        className="w-full p-2 border rounded"
-                                    value={sizeStock.quantity}
-                                    onChange={(e) => setSizeStock(prev => ({ ...prev, quantity: parseInt(e.target.value) || 0 }))}
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Number of Boxes/Trays</label>
+                                <input
+                                    type="number"
+                                    className="w-full p-2 border rounded"
+                                    value={sizeStock.slices}
+                                    onChange={(e) => setSizeStock(prev => ({ ...prev, slices: parseInt(e.target.value) || 0 }))}
                                     min="0"
                                     required
-                                    />
-                                </div>
+                                />
                             </div>
+
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Low Stock Level (Boxes/Trays)</label>
+                                <input
+                                    type="number"
+                                    className="w-full p-2 border rounded"
+                                    value={sizeStock.minimumStock}
+                                    onChange={(e) => setSizeStock(prev => ({ ...prev, minimumStock: parseInt(e.target.value) || 0 }))}
+                                    min="0"
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium mb-2">Critical Level (Boxes/Trays)</label>
+                                <input
+                                    type="number"
+                                    className="w-full p-2 border rounded"
+                                    value={sizeStock.criticalLevel}
+                                    onChange={(e) => setSizeStock(prev => ({ ...prev, criticalLevel: parseInt(e.target.value) || 0 }))}
+                                    min="0"
+                                    required
+                                />
+                            </div>
+
+                            {sizeStock.size && (
+                                <div className="col-span-2">
+                                    <div className="space-y-2 text-sm text-gray-600">
+                                        <p>Total Slices: {
+                                            (sizeStock.slices || 0) * 
+                                            (sizeConfigs.find(s => s.name === sizeStock.size)?.totalSlices || 0)
+                                        } slices</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
 
                         <div className="flex justify-end">
                             <button
@@ -952,12 +1085,12 @@ export default function Stock() {
                             </button>
                         </div>
                     </form>
-                        </div>
+                </div>
 
                 {/* Variety-based Stock Form */}
                 <div className="p-4 bg-gray-50 rounded mb-8">
                     <h3 className="text-lg font-semibold mb-4">Add Variety Stock</h3>
-                    <form onSubmit={(e) => handleSubmit(e, 'variety')} className="space-y-4">
+                    <form onSubmit={handleSubmitVarietyStock} className="space-y-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label className="block text-sm font-medium mb-2">Variety</label>
@@ -975,19 +1108,19 @@ export default function Stock() {
                                     </div>
 
                             <div>
-                                <label className="block text-sm font-medium mb-2">Quantity</label>
+                                <label className="block text-sm font-medium mb-2">Slices</label>
                                 <input
                                     type="number"
                                     className="w-full p-2 border rounded"
-                                    value={varietyStock.quantity}
-                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, quantity: parseInt(e.target.value) || 0 }))}
+                                    value={varietyStock.slices}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, slices: parseInt(e.target.value) || 0 }))}
                                     min="0"
                                     required
                                 />
                                 </div>
 
                                 <div>
-                                <label className="block text-sm font-medium mb-2">Low Stock Level</label>
+                                <label className="block text-sm font-medium mb-2">Low Stock Level (Slices)</label>
                                     <input
                                         type="number"
                                         className="w-full p-2 border rounded"
@@ -999,12 +1132,12 @@ export default function Stock() {
                                 </div>
 
                                 <div>
-                                <label className="block text-sm font-medium mb-2">Critical Level (Reorder Point)</label>
+                                    <label className="block text-sm font-medium mb-2">Critical Level (Slices)</label>
                                     <input
                                         type="number"
                                         className="w-full p-2 border rounded"
-                                    value={varietyStock.reorderPoint}
-                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, reorderPoint: parseInt(e.target.value) || 0 }))}
+                                    value={varietyStock.criticalLevel}
+                                    onChange={(e) => setVarietyStock(prev => ({ ...prev, criticalLevel: parseInt(e.target.value) || 0 }))}
                                         min="0"
                                     required
                                     />
@@ -1107,72 +1240,83 @@ export default function Stock() {
                             <thead>
                                 <tr className="bg-gray-50">
                                     <th className="p-3 text-left">Size</th>
-                                    <th className="p-3 text-right">Quantity</th>
-                                            <th className="p-3 text-center">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {filteredStocks
-                                            .filter(s => s.type === 'size')
-                                            .filter(s => filterCategory === 'all' || s.size === filterCategory)
-                                            .map((stk) => (
-                                                <tr key={stk.id} className="border-t hover:bg-gray-50">
-                                                    <td className="p-3">{stk.size}</td>
-                                                    <td className="p-3 text-right">{stk.quantity}</td>
-                                                    <td className="p-3">
-                                                        <div className="flex justify-center gap-2">
-                                                            <button
-                                                                onClick={() => handleStockAdjustment(stk.id, 1)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Add Stock"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                                            <button
-                                                                onClick={() => handleStockAdjustment(stk.id, -1)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Remove Stock"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                                            <button
-                                                                onClick={() => handleDelete(stk.id)}
-                                                                className="p-1 hover:bg-gray-100 rounded"
-                                                                title="Delete"
-                                                            >
-                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </>
-                    )}
+                                    <th className="p-3 text-right">Boxes/Trays</th>
+                                    <th className="p-3 text-right">Slices per Box/Tray</th>
+                                    <th className="p-3 text-right">Total Slices</th>
+                                    <th className="p-3 text-right">Low Stock Level</th>
+                                    <th className="p-3 text-right">Critical Level</th>
+                                    <th className="p-3 text-center">Stock Status</th>
+                                    <th className="p-3 text-center">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {filteredStocks
+                                    .filter(s => s.type === 'size')
+                                    .map((stk) => {
+                                        const sizeConfig = sizeConfigs.find(s => s.name === stk.size);
+                                        const slicesPerUnit = sizeConfig?.totalSlices || 0;
+                                        const totalSlices = (stk.slices || 0) * slicesPerUnit;
+                                        
+                                        return (
+                                            <tr key={stk.id} className="border-t hover:bg-gray-50">
+                                                <td className="p-3">{stk.size}</td>
+                                                <td className="p-3 text-right">{stk.slices}</td>
+                                                <td className="p-3 text-right">{slicesPerUnit}</td>
+                                                <td className="p-3 text-right">{totalSlices}</td>
+                                                <td className="p-3 text-right">{stk.minimumStock} boxes</td>
+                                                <td className="p-3 text-right">{stk.criticalLevel} boxes</td>
+                                                <td className="p-3 text-center">
+                                                    <span className={`px-2 py-1 rounded-full text-xs ${
+                                                        stk.slices <= stk.criticalLevel
+                                                            ? 'bg-red-100 text-red-800'
+                                                            : stk.slices <= stk.minimumStock
+                                                            ? 'bg-yellow-100 text-yellow-800'
+                                                            : 'bg-green-100 text-green-800'
+                                                    }`}>
+                                                        {stk.slices <= stk.criticalLevel
+                                                            ? 'Critical'
+                                                            : stk.slices <= stk.minimumStock
+                                                            ? 'Low Stock'
+                                                            : 'In Stock'}
+                                                    </span>
+                                                </td>
+                                                <td className="p-3">
+                                                    <div className="flex justify-center">
+                                                        <button
+                                                            onClick={() => handleDelete(stk.id, 'size')}
+                                                            className="p-1 hover:bg-gray-100 rounded"
+                                                            title="Delete"
+                                                        >
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
+                                                                <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                            </tbody>
+                        </table>
+                    </div>
+                </>
+            )}
 
-                    {/* Variety Stock Table */}
-                    {(filterType === 'all' || filterType === 'variety') && (
-                        <>
-                            <h3 className="text-lg font-semibold mb-2">Variety Stocks</h3>
-                            <div className="overflow-x-auto">
-                                <table className="min-w-full">
-                                    <thead>
-                                        <tr className="bg-gray-50">
-                                            <th className="p-3 text-left">Variety</th>
-                                            <th className="p-3 text-right">Quantity</th>
-                                            <th className="p-3 text-right">Min. Stock</th>
-                                            <th className="p-3 text-right">Reorder Point</th>
+            {/* Variety Stock Table */}
+            {(filterType === 'all' || filterType === 'variety') && (
+                <>
+                    <h3 className="text-lg font-semibold mb-2">Variety Stocks</h3>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full">
+                            <thead>
+                                <tr className="bg-gray-50">
+                                    <th className="p-3 text-left">Variety</th>
+                                    <th className="p-3 text-right">Slices</th>
+                                    <th className="p-3 text-right">Min. Slices</th>
+                                    <th className="p-3 text-right">Critical Level</th>
                                     <th className="p-3 text-center">Stock Status</th>
                                     <th className="p-3 text-center">Expiry Status</th>
-                                            <th className="p-3 text-left">Production Date</th>
+                                    <th className="p-3 text-left">Production Date</th>
                                     <th className="p-3 text-left">Expiry Date</th>
                                     <th className="p-3 text-center">Actions</th>
                                 </tr>
@@ -1180,27 +1324,25 @@ export default function Stock() {
                             <tbody>
                                         {filteredStocks
                                             .filter(s => s.type === 'variety')
-                                            .filter(s => !searchTerm || (s.variety?.toLowerCase() ?? '').includes(searchTerm.toLowerCase()))
-                                            .filter(s => showLowStock ? s.quantity <= s.minimumStock : true)
                                             .map((stk) => {
                                                 const expiryStatus = stk.expiryDate ? getExpiryStatus(stk.expiryDate) : { status: 'N/A', className: 'bg-gray-100 text-gray-800' };
                                     return (
                                         <tr key={stk.id} className="border-t hover:bg-gray-50">
                                                         <td className="p-3">{stk.variety}</td>
-                                                        <td className="p-3 text-right">{stk.quantity}</td>
+                                                        <td className="p-3 text-right">{stk.slices}</td>
                                                         <td className="p-3 text-right">{stk.minimumStock}</td>
-                                                        <td className="p-3 text-right">{stk.reorderPoint}</td>
+                                                        <td className="p-3 text-right">{stk.criticalLevel}</td>
                                             <td className="p-3 text-center">
                                                 <span className={`px-2 py-1 rounded-full text-xs ${
-                                                                stk.quantity <= stk.minimumStock
+                                                                stk.slices <= stk.minimumStock
                                                         ? 'bg-red-100 text-red-800'
-                                                                    : stk.quantity <= stk.reorderPoint
+                                                                    : stk.slices <= stk.criticalLevel
                                                         ? 'bg-yellow-100 text-yellow-800'
                                                         : 'bg-green-100 text-green-800'
                                                 }`}>
-                                                                {stk.quantity <= stk.minimumStock
+                                                                {stk.slices <= stk.minimumStock
                                                         ? 'Low Stock'
-                                                                    : stk.quantity <= stk.reorderPoint
+                                                                    : stk.slices <= stk.criticalLevel
                                                         ? 'Reorder Soon'
                                                         : 'In Stock'}
                                                 </span>
@@ -1213,36 +1355,9 @@ export default function Stock() {
                                                         <td className="p-3">{formatDate(stk.productionDate)}</td>
                                                         <td className="p-3">{formatDate(stk.expiryDate)}</td>
                                             <td className="p-3">
-                                                <div className="flex justify-center gap-2">
+                                                <div className="flex justify-center">
                                                     <button
-                                                        onClick={() => handleStockAdjustment(stk.id, 1)}
-                                                        className="p-1 hover:bg-gray-100 rounded"
-                                                        title="Add Stock"
-                                                    >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-green-600" viewBox="0 0 20 20" fill="currentColor">
-                                                            <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
-                                                        </svg>
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleStockAdjustment(stk.id, -1)}
-                                                        className="p-1 hover:bg-gray-100 rounded"
-                                                        title="Remove Stock"
-                                                    >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600" viewBox="0 0 20 20" fill="currentColor">
-                                                            <path fillRule="evenodd" d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                                                        </svg>
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleEdit(stk)}
-                                                        className="p-1 hover:bg-gray-100 rounded"
-                                                        title="Edit"
-                                                    >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
-                                                            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                                        </svg>
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleDelete(stk.id)}
+                                                        onClick={() => handleDelete(stk.id, 'variety')}
                                                         className="p-1 hover:bg-gray-100 rounded"
                                                         title="Delete"
                                                     >
@@ -1306,9 +1421,9 @@ export default function Stock() {
                                                      'Adjustment'}
                                                 </span>
                                             </td>
-                                            <td className="p-3 text-right">{history.previousQuantity}</td>
-                                            <td className="p-3 text-right">{history.quantity}</td>
-                                            <td className="p-3 text-right">{history.newQuantity}</td>
+                                            <td className="p-3 text-right">{history.previousSlices}</td>
+                                            <td className="p-3 text-right">{history.slices}</td>
+                                            <td className="p-3 text-right">{history.newSlices}</td>
                                             <td className="p-3">{history.updatedBy}</td>
                                             <td className="p-3">{history.remarks}</td>
                                         </tr>

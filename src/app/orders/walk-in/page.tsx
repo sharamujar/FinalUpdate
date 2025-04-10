@@ -1,32 +1,87 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { addDoc, collection, getDocs, query, where, serverTimestamp } from "firebase/firestore";
 import { db } from "../../firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
-import {
-  collection,
-  addDoc,
-  getDocs,
-  query,
-  where,
-  serverTimestamp,
-  doc,
-  runTransaction,
-  Transaction,
-} from "firebase/firestore";
 import Sidebar from "@/app/components/Sidebar";
 
-interface Stock {
+const VARIETIES = [
+  'Bibingka',
+  'Sapin-Sapin',
+  'Kutsinta',
+  'Kalamay',
+  'Cassava'
+] as const;
+
+interface SizeConfig {
   id: string;
-  sizeId: string;
-  sizeName: string;
-  combinations: Array<{
-    varieties: string[];
-    quantity: number;
-  }>;
-  totalQuantity: number;
+  name: string;
   price: number;
+  maxVarieties: number;
+  minVarieties: number;
+  totalSlices: number;
+  allowedVarieties: readonly string[];
+  excludedVarieties?: readonly string[];
 }
+
+const sizeConfigs: SizeConfig[] = [
+  {
+    id: '1',
+    name: 'Big Bilao',
+    price: 520.00,
+    maxVarieties: 4,
+    minVarieties: 1,
+    totalSlices: 60,
+    excludedVarieties: ['Cassava'],
+    allowedVarieties: ['Bibingka', 'Sapin-Sapin', 'Kutsinta', 'Kalamay']
+  },
+  {
+    id: '2',
+    name: 'Tray',
+    price: 420.00,
+    maxVarieties: 4,
+    minVarieties: 1,
+    totalSlices: 48,
+    allowedVarieties: VARIETIES
+  },
+  {
+    id: '3',
+    name: 'Small',
+    price: 280.00,
+    maxVarieties: 1,
+    minVarieties: 1,
+    totalSlices: 30,
+    allowedVarieties: ['Bibingka']
+  },
+  {
+    id: '4',
+    name: 'Half Tray',
+    price: 240.00,
+    maxVarieties: 2,
+    minVarieties: 1,
+    totalSlices: 24,
+    allowedVarieties: VARIETIES
+  },
+  {
+    id: '5',
+    name: 'Solo',
+    price: 200.00,
+    maxVarieties: 1,
+    minVarieties: 1,
+    totalSlices: 20,
+    allowedVarieties: ['Bibingka']
+  },
+  {
+    id: '6',
+    name: '1/4 Slice',
+    price: 140.00,
+    maxVarieties: 5,
+    minVarieties: 1,
+    totalSlices: 12,
+    allowedVarieties: VARIETIES
+  }
+];
 
 interface SelectedProduct {
   id: string;
@@ -79,7 +134,6 @@ interface Order {
 }
 
 export default function WalkInOrders() {
-  const [stocks, setStocks] = useState<Stock[]>([]);
   const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([]);
   const [totalAmount, setTotalAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<string>("Cash");
@@ -89,30 +143,186 @@ export default function WalkInOrders() {
   const [gcashReference, setGcashReference] = useState<string>("");
 
   useEffect(() => {
-    fetchStocks();
     fetchWalkInOrders();
   }, []);
 
-  const fetchStocks = async () => {
+  const handleAddProduct = (sizeConfig: SizeConfig) => {
+    const selectedProduct: SelectedProduct = {
+      id: sizeConfig.id,
+      size: sizeConfig.name,
+      varieties: Array.from(sizeConfig.allowedVarieties),
+      selectedVarieties: [],
+      quantity: 1,
+      price: sizeConfig.price,
+      stockQuantity: 999,
+      combinations: []
+    };
+
+    setSelectedProducts([...selectedProducts, selectedProduct]);
+    setTotalAmount(prev => prev + sizeConfig.price);
+  };
+
+  const handleRemoveProduct = (index: number) => {
+    const product = selectedProducts[index];
+    setSelectedProducts(selectedProducts.filter((_, i) => i !== index));
+    setTotalAmount(prev => prev - (product.price * product.quantity));
+  };
+
+  const handleQuantityChange = (index: number, newQuantity: number) => {
+    if (newQuantity < 1) return;
+    
+    const updatedProducts = [...selectedProducts];
+    const product = updatedProducts[index];
+    const oldTotal = product.price * product.quantity;
+    const newTotal = product.price * newQuantity;
+    
+    updatedProducts[index] = {
+      ...product,
+      quantity: newQuantity
+    };
+    
+    setSelectedProducts(updatedProducts);
+    setTotalAmount(prev => prev - oldTotal + newTotal);
+  };
+
+  const handleVarietyChange = (index: number, selectedOptions: string[]) => {
+    const updatedProducts = [...selectedProducts];
+    const product = updatedProducts[index];
+    const sizeConfig = sizeConfigs.find(s => s.name === product.size);
+    
+    if (!sizeConfig) return;
+
+    if (selectedOptions.length > sizeConfig.maxVarieties) {
+      alert(`${sizeConfig.name} can only have up to ${sizeConfig.maxVarieties} varieties`);
+      return;
+    }
+
+    if (selectedOptions.length < sizeConfig.minVarieties) {
+      alert(`${sizeConfig.name} must have at least ${sizeConfig.minVarieties} varieties`);
+      return;
+    }
+
+    updatedProducts[index] = {
+      ...product,
+      selectedVarieties: selectedOptions
+    };
+    setSelectedProducts(updatedProducts);
+  };
+
+  const handlePaymentMethodChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    setPaymentMethod(e.target.value);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    if (!customerName.trim()) {
+      alert("Please enter customer name");
+      setLoading(false);
+      return;
+    }
+
+    if (selectedProducts.length === 0) {
+      alert("Please select at least one product");
+      setLoading(false);
+      return;
+    }
+
+    if (paymentMethod === "GCash" && !gcashReference) {
+      alert("Please enter GCash reference number");
+      setLoading(false);
+      return;
+    }
+
+    // Validate that all products have required varieties selected
+    for (const product of selectedProducts) {
+      const sizeConfig = sizeConfigs.find(s => s.name === product.size);
+      if (!sizeConfig) {
+        alert(`Invalid size configuration for ${product.size}`);
+        setLoading(false);
+        return;
+      }
+
+      if (product.selectedVarieties.length < sizeConfig.minVarieties) {
+        alert(`Please select at least ${sizeConfig.minVarieties} variety for ${product.size}`);
+        setLoading(false);
+        return;
+      }
+    }
+
     try {
-      const stocksSnapshot = await getDocs(collection(db, "stocks"));
-      const stocksList = stocksSnapshot.docs
-        .map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            sizeId: data.sizeId || "",
-            sizeName: data.sizeName || "",
-            combinations: data.combinations || [],
-            totalQuantity: data.totalQuantity || 0,
-            price: data.price || 0
-          };
-        })
-        .filter(stock => stock.totalQuantity > 0) as Stock[];
+      const orderRef = collection(db, "orders");
+      const now = new Date().toISOString();
       
-      setStocks(stocksList);
+      const newOrder = {
+        orderType: "walk-in",
+        customerName: customerName.trim(),
+        orderDetails: {
+          orderType: "walk-in",
+          status: paymentMethod === "Cash" ? "approved" : "pending",
+          paymentMethod,
+          paymentStatus: paymentMethod === "Cash" ? "approved" : "pending",
+          gcashReference: paymentMethod === "GCash" ? gcashReference : null,
+          totalAmount,
+          createdAt: now,
+          updatedAt: now,
+          pickupDate: now,
+          pickupTime: new Date().toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit', 
+            hour12: true 
+          })
+        },
+        items: selectedProducts.map(p => ({
+          cartId: p.id,
+          productSize: p.size,
+          productVarieties: p.selectedVarieties,
+          productQuantity: p.quantity,
+          productPrice: p.price
+        }))
+      };
+
+      const orderDoc = await addDoc(orderRef, newOrder);
+
+      if (paymentMethod === "Cash") {
+        const salesRef = collection(db, "sales");
+        const saleData = {
+          orderId: orderDoc.id,
+          orderType: "walk-in",
+          customerName: customerName.trim(),
+          amount: totalAmount,
+          date: serverTimestamp(),
+          items: selectedProducts.map(p => ({
+            productSize: p.size,
+            productVariety: p.selectedVarieties.join(", "),
+            productQuantity: p.quantity,
+            productPrice: p.price
+          })),
+          paymentMethod,
+          status: "approved"
+        };
+        await addDoc(salesRef, saleData);
+      }
+
+      setSelectedProducts([]);
+      setTotalAmount(0);
+      setCustomerName("");
+      setPaymentMethod("Cash");
+      setGcashReference("");
+      
+      fetchWalkInOrders();
+      
+      alert("Order created successfully!");
     } catch (error) {
-      console.error("Error fetching stocks:", error);
+      console.error("Error creating order:", error);
+      if (error instanceof Error) {
+        alert(`Failed to create order: ${error.message}`);
+      } else {
+        alert("Failed to create order. Please try again.");
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -155,222 +365,6 @@ export default function WalkInOrders() {
       setOrders(ordersList);
     } catch (error) {
       console.error("Error fetching walk-in orders:", error);
-    }
-  };
-
-  const handleAddProduct = (stock: Stock) => {
-    const allVarieties = stock.combinations.reduce((acc, combo) => {
-      combo.varieties.forEach(variety => {
-        if (!acc.includes(variety)) {
-          acc.push(variety);
-        }
-      });
-      return acc;
-    }, [] as string[]);
-
-    const selectedProduct: SelectedProduct = {
-      id: stock.id,
-      size: stock.sizeName,
-      varieties: allVarieties,
-      selectedVarieties: [],
-      quantity: 1,
-      price: stock.price,
-      stockQuantity: stock.totalQuantity,
-      combinations: stock.combinations
-    };
-
-    if (stock.sizeName !== "Tray" && stock.sizeName !== "Big Bilao") {
-      selectedProduct.selectedVarieties = [allVarieties[0]];
-    }
-
-    setSelectedProducts([...selectedProducts, selectedProduct]);
-    setTotalAmount(prev => prev + stock.price);
-  };
-
-  const handleRemoveProduct = (index: number) => {
-    const product = selectedProducts[index];
-    setSelectedProducts(selectedProducts.filter((_, i) => i !== index));
-    setTotalAmount(prev => prev - product.price);
-  };
-
-  const handleQuantityChange = (index: number, newQuantity: number) => {
-    const product = selectedProducts[index];
-    const maxQuantity = product.stockQuantity;
-    
-    if (newQuantity > 0 && newQuantity <= maxQuantity) {
-      const updatedProducts = [...selectedProducts];
-      const oldTotal = product.price * product.quantity;
-      const newTotal = product.price * newQuantity;
-      
-      updatedProducts[index] = {
-        ...product,
-        quantity: newQuantity
-      };
-      
-      setSelectedProducts(updatedProducts);
-      setTotalAmount(prev => prev - oldTotal + newTotal);
-    }
-  };
-
-  const handleVarietyChange = (index: number, selectedOptions: string[]) => {
-    const updatedProducts = [...selectedProducts];
-    const product = updatedProducts[index];
-    
-    if ((product.size === "Tray" || product.size === "Big Bilao") && selectedOptions.length > 4) {
-      alert("Maximum of 4 varieties allowed for Tray and Big Bilao");
-      return;
-    }
-
-    updatedProducts[index] = {
-      ...product,
-      selectedVarieties: selectedOptions
-    };
-    setSelectedProducts(updatedProducts);
-  };
-
-  const handlePaymentMethodChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setPaymentMethod(e.target.value);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-
-    if (!customerName.trim()) {
-      alert("Please enter customer name");
-      setLoading(false);
-      return;
-    }
-
-    if (selectedProducts.length === 0) {
-      alert("Please select at least one product");
-      setLoading(false);
-      return;
-    }
-
-    if (paymentMethod === "GCash" && !gcashReference) {
-      alert("Please enter GCash reference number");
-      setLoading(false);
-      return;
-    }
-
-    try {
-      await runTransaction(db, async (transaction: Transaction) => {
-        const stockReads = selectedProducts.map(async (product) => {
-          const stockRef = doc(db, "stocks", product.id);
-          const stockDoc = await transaction.get(stockRef);
-          
-          if (!stockDoc.exists()) {
-            throw new Error(`Stock not found for ${product.size}`);
-          }
-
-          const currentStock = stockDoc.data().totalQuantity;
-          if (currentStock < product.quantity) {
-            throw new Error(`Insufficient stock for ${product.size}`);
-          }
-
-          return {
-            ref: stockRef,
-            currentStock,
-            product
-          };
-        });
-
-        const stockData = await Promise.all(stockReads);
-
-        const orderRef = collection(db, "orders");
-        const now = new Date().toISOString();
-        
-        const newOrder = {
-          orderType: "walk-in",
-          customerName: customerName.trim(),
-          orderDetails: {
-            orderType: "walk-in",
-            status: paymentMethod === "Cash" ? "completed" : "pending",
-            paymentMethod,
-            paymentStatus: paymentMethod === "Cash" ? "completed" : "pending",
-            gcashReference: paymentMethod === "GCash" ? gcashReference : null,
-            totalAmount,
-            createdAt: now,
-            updatedAt: now,
-            pickupDate: now,
-            pickupTime: new Date().toLocaleTimeString('en-US', { 
-              hour: 'numeric', 
-              minute: '2-digit', 
-              hour12: true 
-            })
-          },
-          items: selectedProducts.map(p => ({
-            cartId: p.id,
-            productSize: p.size,
-            productVarieties: p.selectedVarieties,
-            productQuantity: p.quantity,
-            productPrice: p.price
-          }))
-        };
-
-        const orderDoc = await addDoc(orderRef, newOrder);
-
-        stockData.forEach(({ ref, currentStock, product }) => {
-          transaction.update(ref, {
-            totalQuantity: currentStock - product.quantity,
-            lastUpdated: serverTimestamp()
-          });
-
-          const historyRef = doc(collection(db, "stockHistory"));
-          transaction.set(historyRef, {
-            stockId: product.id,
-            type: "out",
-            quantity: product.quantity,
-            previousStock: currentStock,
-            currentStock: currentStock - product.quantity,
-            date: serverTimestamp(),
-            reason: `Walk-in order #${orderDoc.id.slice(0, 6)}`,
-            updatedBy: "System",
-            isDeleted: false
-          });
-        });
-
-        if (paymentMethod === "Cash") {
-          const salesRef = collection(db, "sales");
-          const saleData = {
-            orderId: orderDoc.id,
-            orderType: "walk-in",
-            customerName: customerName.trim(),
-            amount: totalAmount,
-            date: serverTimestamp(),
-            items: selectedProducts.map(p => ({
-              productSize: p.size,
-              productVariety: p.selectedVarieties.join(", "),
-              productQuantity: p.quantity,
-              productPrice: p.price
-            })),
-            paymentMethod,
-            status: "completed"
-          };
-          transaction.set(doc(salesRef), saleData);
-        }
-      });
-
-      setSelectedProducts([]);
-      setTotalAmount(0);
-      setCustomerName("");
-      setPaymentMethod("Cash");
-      setGcashReference("");
-      
-      fetchWalkInOrders();
-      fetchStocks();
-      
-      alert("Order created successfully!");
-    } catch (error) {
-      console.error("Error creating order:", error);
-      if (error instanceof Error) {
-        alert(`Failed to create order: ${error.message}`);
-      } else {
-        alert("Failed to create order. Please try again.");
-      }
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -422,36 +416,33 @@ export default function WalkInOrders() {
               )}
 
               <div>
-                <label className="block text-sm font-medium text-gray-700">Available Stock Items</label>
-                <div className="mt-2 space-y-2 max-h-[400px] overflow-y-auto">
-                  {stocks.length === 0 ? (
-                    <p className="text-gray-500 text-center py-4">No items available in stock</p>
-                  ) : (
-                    stocks.map((stock) => (
-                      <div key={stock.id} className="flex items-center justify-between p-3 bg-gray-50 rounded border">
-                        <div className="flex-1">
-                          <span className="block font-medium">{stock.sizeName}</span>
-                          <div className="text-sm text-gray-600">
-                            {stock.combinations.map((combo, idx) => (
-                              <div key={idx} className="mb-1">
-                                <span>Varieties: {combo.varieties.join(", ")}</span>
-                                <span className="ml-2 text-gray-500">(Stock: {combo.quantity})</span>
-                              </div>
-                            ))}
-                          </div>
-                          <span className="block text-sm font-medium text-blue-600">Price: ₱{stock.price.toLocaleString()}</span>
+                <label className="block text-sm font-medium text-gray-700">Select Size</label>
+                <div className="mt-2 space-y-2">
+                  {sizeConfigs.map((size) => (
+                    <div key={size.id} className="flex items-center justify-between p-3 bg-gray-50 rounded border">
+                      <div className="flex-1">
+                        <span className="block font-medium">{size.name}</span>
+                        <div className="text-sm text-gray-600">
+                          <p>Total Slices: {size.totalSlices}</p>
+                          {size.allowedVarieties && (
+                            <p>Allowed Varieties: {size.allowedVarieties.join(", ")}</p>
+                          )}
+                          {size.excludedVarieties && (
+                            <p>Excluded Varieties: {size.excludedVarieties.join(", ")}</p>
+                          )}
+                          <p>Varieties: Min {size.minVarieties}, Max {size.maxVarieties}</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleAddProduct(stock)}
-                          disabled={stock.totalQuantity === 0}
-                          className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed ml-4"
-                        >
-                          Add
-                        </button>
+                        <span className="block text-sm font-medium text-blue-600">Price: ₱{size.price.toLocaleString()}</span>
                       </div>
-                    ))
-                  )}
+                      <button
+                        type="button"
+                        onClick={() => handleAddProduct(size)}
+                        className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -478,13 +469,15 @@ export default function WalkInOrders() {
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <label className="block text-sm font-medium text-gray-700">
-                            {product.size === "Tray" || product.size === "Big Bilao" 
-                              ? `Varieties (Select up to 4)` 
-                              : "Variety"}
+                            Select Varieties (Min: {sizeConfigs.find(s => s.name === product.size)?.minVarieties || 1}, 
+                            Max: {sizeConfigs.find(s => s.name === product.size)?.maxVarieties || 1})
                           </label>
-                          {product.size === "Tray" || product.size === "Big Bilao" ? (
-                            <div className="mt-2 space-y-2">
-                              {product.varieties.map((variety) => (
+                          <div className="mt-2 space-y-2">
+                            {product.varieties.map((variety) => {
+                              const sizeConfig = sizeConfigs.find(s => s.name === product.size);
+                              if (!sizeConfig) return null;
+                              
+                              return (
                                 <label key={variety} className="flex items-center">
                                   <input
                                     type="checkbox"
@@ -499,25 +492,12 @@ export default function WalkInOrders() {
                                   />
                                   <span className="ml-2 text-sm text-gray-700">{variety}</span>
                                 </label>
-                              ))}
-                            </div>
-                          ) : (
-                            <select
-                              value={product.selectedVarieties[0] || ""}
-                              onChange={(e) => handleVarietyChange(index, [e.target.value])}
-                              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                            >
-                              {product.varieties.map((variety) => (
-                                <option key={variety} value={variety}>
-                                  {variety}
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                          {(product.size === "Tray" || product.size === "Big Bilao") && 
-                            product.selectedVarieties.length === 0 && (
+                              );
+                            })}
+                          </div>
+                          {product.selectedVarieties.length < (sizeConfigs.find(s => s.name === product.size)?.minVarieties || 1) && (
                             <p className="mt-1 text-sm text-red-500">
-                              Please select at least one variety
+                              Please select at least {sizeConfigs.find(s => s.name === product.size)?.minVarieties || 1} variety
                             </p>
                           )}
                         </div>
@@ -537,7 +517,6 @@ export default function WalkInOrders() {
                               value={product.quantity}
                               onChange={(e) => handleQuantityChange(index, parseInt(e.target.value) || 0)}
                               min="1"
-                              max={product.stockQuantity}
                               className="block w-20 border-gray-300 focus:border-blue-500 focus:ring-blue-500 text-center"
                             />
                             <button
@@ -548,7 +527,6 @@ export default function WalkInOrders() {
                               +
                             </button>
                           </div>
-                          <p className="mt-1 text-sm text-gray-500">Max: {product.stockQuantity}</p>
                         </div>
                       </div>
                       
