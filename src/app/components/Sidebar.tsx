@@ -121,20 +121,20 @@ const Sidebar = () => {
                     All Orders
                   </div>
                 </Link>
+                <Link href="/dashboard/scheduled-orders">
+                  <div className="flex items-center w-full p-2 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900">
+                    <div className="grid mr-4 place-items-center">
+                      <Calendar className="w-4 h-4" />
+                    </div>
+                    Scheduled Orders
+                  </div>
+                </Link>
                 <Link href="/orders/walk-in">
                   <div className="flex items-center w-full p-2 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900">
                     <div className="grid mr-4 place-items-center">
                       <Users className="w-4 h-4" />
                     </div>
                     Walk-in Orders
-                  </div>
-                </Link>
-                <Link href="/orders/scheduled-pickup">
-                  <div className="flex items-center w-full p-2 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900">
-                    <div className="grid mr-4 place-items-center">
-                      <Calendar className="w-4 h-4" />
-                    </div>
-                    Scheduled Pickup
                   </div>
                 </Link>
                 <Link href="/orders/pickup-now">

@@ -20,6 +20,8 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // Register ChartJS components
 ChartJS.register(
@@ -103,16 +105,17 @@ interface Stock {
 }
 
 interface OrderData {
-  userId: string;
-  orderType?: string;
-  customerName?: string;
+  id: string;
+  orderType: string;
+  customerName: string;
   orderDetails: {
-    totalAmount: number;
     status: string;
-    orderStatus?: string;
+    orderStatus: string;
     completedAt: string;
-    updatedAt: string;
+    totalAmount: number;
+    customerName: string;
     createdAt: string;
+    updatedAt: string;
     isWalkin: boolean;
   };
   userDetails?: {
@@ -122,6 +125,7 @@ interface OrderData {
   customerDetails?: {
     name: string;
   };
+  items: any[];
 }
 
 interface Notification {
@@ -355,9 +359,9 @@ export default function Dashboard() {
                 varietySales.set(variety, {
                   name: variety,
                   totalSlices: 0,
-                  revenue: 0
-                });
-              }
+              revenue: 0
+            });
+          }
               const product = varietySales.get(variety);
               // Calculate slices based on size
               let slicesPerUnit = 0;
@@ -929,6 +933,114 @@ export default function Dashboard() {
     router.push('/inventory/stock-management');
   };
 
+  // Update the generateSalesReport function
+  const generateSalesReport = async (period: 'daily' | 'weekly' | 'monthly') => {
+    try {
+      const salesRef = collection(db, "orders");
+      const now = new Date();
+      let startDate: Date;
+      let endDate: Date = now;
+
+      switch (period) {
+        case 'daily':
+          startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          break;
+        case 'weekly':
+          startDate = new Date(now);
+          startDate.setDate(now.getDate() - 7);
+          break;
+        case 'monthly':
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+          break;
+        default:
+          startDate = now;
+      }
+
+      const salesQuery = query(
+        salesRef,
+        where("orderDetails.status", "==", "Completed"),
+        where("orderDetails.completedAt", ">=", startDate.toISOString()),
+        where("orderDetails.completedAt", "<=", endDate.toISOString())
+      );
+
+      const salesSnapshot = await getDocs(salesQuery);
+      const orders = salesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as OrderData[];
+
+      // Calculate totals
+      const totalSales = orders.reduce((sum, order) => sum + order.orderDetails.totalAmount, 0);
+      const totalOrders = orders.length;
+
+      // Create PDF document
+      const doc = new jsPDF();
+      
+      // Add title
+      doc.setFontSize(20);
+      doc.text(`${period.charAt(0).toUpperCase() + period.slice(1)} Sales Report`, 14, 20);
+      
+      // Add report period
+      doc.setFontSize(12);
+      doc.text(`Period: ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}`, 14, 30);
+      
+      // Add summary
+      doc.setFontSize(14);
+      doc.text('Summary', 14, 40);
+      doc.setFontSize(12);
+      doc.text(`Total Sales: ₱${totalSales.toLocaleString()}`, 14, 50);
+      doc.text(`Total Orders: ${totalOrders}`, 14, 60);
+      
+      // Add orders table
+      doc.setFontSize(14);
+      doc.text('Order Details', 14, 80);
+      
+      // Prepare table data
+      const tableData = orders.map(order => [
+        order.id.slice(0, 6),
+        order.orderDetails.customerName,
+        `₱${order.orderDetails.totalAmount.toLocaleString()}`,
+        new Date(order.orderDetails.completedAt).toLocaleDateString()
+      ]);
+
+      // Add table using autoTable
+      autoTable(doc, {
+        startY: 90,
+        head: [['Order ID', 'Customer', 'Amount', 'Date']],
+        body: tableData,
+        theme: 'grid',
+        headStyles: {
+          fillColor: [41, 128, 185],
+          textColor: 255,
+          fontStyle: 'bold'
+        },
+        alternateRowStyles: {
+          fillColor: [245, 245, 245]
+        }
+      });
+
+      // Save the PDF
+      doc.save(`${period}-sales-report-${new Date().toISOString().split('T')[0]}.pdf`);
+
+      // Show success notification
+      setNotifications(prev => [...prev, {
+        id: `report-${Date.now()}`,
+        message: `${period.charAt(0).toUpperCase() + period.slice(1)} sales report generated successfully`,
+        type: 'success',
+        createdAt: new Date()
+      }]);
+
+    } catch (error) {
+      console.error("Error generating sales report:", error);
+      setNotifications(prev => [...prev, {
+        id: `error-${Date.now()}`,
+        message: "Failed to generate sales report",
+        type: 'error',
+        createdAt: new Date()
+      }]);
+    }
+  };
+
   if (isLoading) {
     return (
       <ProtectedRoute>
@@ -988,7 +1100,10 @@ export default function Dashboard() {
 
             {/* Quick Stats Cards */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+            <div 
+              className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow cursor-pointer"
+              onClick={() => generateSalesReport('daily')}
+            >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-medium text-gray-500">Daily Sales</h3>
                 <span className="p-2 bg-blue-50 text-blue-600 rounded-lg">
@@ -1002,7 +1117,10 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500 mt-1">Today's revenue</p>
               </div>
 
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+            <div 
+              className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow cursor-pointer"
+              onClick={() => generateSalesReport('weekly')}
+            >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-medium text-gray-500">Weekly Sales</h3>
                 <span className="p-2 bg-green-50 text-green-600 rounded-lg">
@@ -1016,7 +1134,10 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500 mt-1">Last 7 days</p>
             </div>
 
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+            <div 
+              className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow cursor-pointer"
+              onClick={() => generateSalesReport('monthly')}
+            >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-medium text-gray-500">Monthly Sales</h3>
                 <span className="p-2 bg-purple-50 text-purple-600 rounded-lg">
