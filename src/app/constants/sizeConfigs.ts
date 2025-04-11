@@ -64,10 +64,10 @@ export const sizeConfigs: Size[] = [
         id: '6',
         name: '1/4',
         price: 140.00,
-        maxVarieties: 5,
+        maxVarieties: 1,
         minVarieties: 1,
         totalSlices: 12,
         boxPrice: 140.00,
-        description: 'Can have up to 5 varieties'
+        description: 'Can only have 1 variety'
     }
 ]; 

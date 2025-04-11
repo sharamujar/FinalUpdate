@@ -645,19 +645,19 @@ export default function Stock() {
             const docRef = await addDoc(collection(db, "varietyStocks"), newStockData);
             await updateDoc(doc(db, "varietyStocks", docRef.id), { id: docRef.id });
 
-            await addDoc(collection(db, "stockHistory"), {
+                await addDoc(collection(db, "stockHistory"), {
                 stockId: docRef.id,
                 size: '',
                 variety: varietyStock.variety,
-                type: 'in',
+                    type: 'in',
                 slices: varietyStock.slices,
                 previousSlices: 0,
                 newSlices: varietyStock.slices,
-                date: new Date(),
-                updatedBy: "Admin",
+                    date: new Date(),
+                    updatedBy: "Admin",
                 remarks: `Added ${varietyStock.slices} slices of ${varietyStock.variety}`,
-                isDeleted: false
-            });
+                    isDeleted: false
+                });
 
             alert("Variety stock added successfully!");
             setVarietyStock({
@@ -1009,11 +1009,11 @@ export default function Stock() {
                 <div className="mb-8 p-4 bg-gray-50 rounded">
                     <h3 className="text-lg font-semibold mb-4">Add Size Stock</h3>
                     <form onSubmit={handleSubmitSizeStock} className="space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
                                 <label className="block text-sm font-medium mb-2">Select Size</label>
-                                <select
-                                    className="w-full p-2 border rounded"
+                                    <select
+                                        className="w-full p-2 border rounded"
                                     value={sizeStock.size}
                                     onChange={(e) => setSizeStock(prev => ({ ...prev, size: e.target.value }))}
                                     required
@@ -1022,22 +1022,22 @@ export default function Stock() {
                                     {sizeConfigs.map(size => (
                                         <option key={size.id} value={size.name}>
                                             {size.name} ({size.totalSlices} slices)
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
 
-                            <div>
+                                <div>
                                 <label className="block text-sm font-medium mb-2">Number of Boxes/Trays</label>
-                                <input
-                                    type="number"
-                                    className="w-full p-2 border rounded"
+                                    <input
+                                        type="number"
+                                        className="w-full p-2 border rounded"
                                     value={sizeStock.slices}
                                     onChange={(e) => setSizeStock(prev => ({ ...prev, slices: parseInt(e.target.value) || 0 }))}
                                     min="0"
                                     required
-                                />
-                            </div>
+                                    />
+                                </div>
 
                             <div>
                                 <label className="block text-sm font-medium mb-2">Low Stock Level (Boxes/Trays)</label>
@@ -1061,7 +1061,7 @@ export default function Stock() {
                                     min="0"
                                     required
                                 />
-                            </div>
+                        </div>
 
                             {sizeStock.size && (
                                 <div className="col-span-2">
@@ -1076,14 +1076,14 @@ export default function Stock() {
                         </div>
 
                         <div className="flex justify-end">
-                            <button
+                                            <button
                                 type="submit"
                                 className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
                                 disabled={loading}
                             >
                                 {loading ? 'Adding...' : 'Add Size Stock'}
-                            </button>
-                        </div>
+                                            </button>
+                                        </div>
                     </form>
                 </div>
 
@@ -1257,8 +1257,8 @@ export default function Stock() {
                                         const slicesPerUnit = sizeConfig?.totalSlices || 0;
                                         const totalSlices = (stk.slices || 0) * slicesPerUnit;
                                         
-                                        return (
-                                            <tr key={stk.id} className="border-t hover:bg-gray-50">
+                                    return (
+                                        <tr key={stk.id} className="border-t hover:bg-gray-50">
                                                 <td className="p-3">{stk.size}</td>
                                                 <td className="p-3 text-right">{stk.slices}</td>
                                                 <td className="p-3 text-right">{slicesPerUnit}</td>
@@ -1280,7 +1280,7 @@ export default function Stock() {
                                                             : 'In Stock'}
                                                     </span>
                                                 </td>
-                                                <td className="p-3">
+                                            <td className="p-3">
                                                     <div className="flex justify-center">
                                                         <button
                                                             onClick={() => handleDelete(stk.id, 'size')}
@@ -1291,8 +1291,8 @@ export default function Stock() {
                                                                 <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
                                                             </svg>
                                                         </button>
-                                                    </div>
-                                                </td>
+                                                </div>
+                                            </td>
                                             </tr>
                                         );
                                     })}

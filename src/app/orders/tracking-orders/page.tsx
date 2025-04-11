@@ -24,7 +24,7 @@ import {
 import Sidebar from "@/app/components/Sidebar";
 
 // Import size configurations
-import { Size, sizeConfigs } from "@/app/constants/sizeConfigs";
+import { sizeConfigs } from "@/app/constants/sizeConfigs";
 
 // Add the VARIETIES constant at the top level
 const VARIETIES = [
@@ -35,7 +35,7 @@ const VARIETIES = [
     'Cassava'
 ] as const;
 
-interface Size {
+interface SizeConfig {
     id: string;
     name: string;
     price: number;
@@ -62,8 +62,8 @@ interface StockUpdate {
 }
 
 interface VarietyCombination {
-    varieties: string[];
-    quantity: number;
+  varieties: string[];
+  quantity: number;
 }
 
 interface StockData {
@@ -86,6 +86,7 @@ interface Order {
     pickupTime: string;
     pickupDate: string;
     status: string;
+    orderStatus?: string;
     totalAmount: number;
     paymentMethod: string;
     paymentStatus?: string;
@@ -178,6 +179,18 @@ export default function TrackingOrders() {
       const q = query(trackingOrdersRef, where("orderId", "==", order.id));
       const querySnapshot = await getDocs(q);
 
+      // Set initial status to "Order Confirmed"
+      const initialStatus = "Order Confirmed";
+
+      // Update the original order status if it's a new order
+      if (!order.orderDetails.status && !order.orderDetails.orderStatus) {
+        await updateDoc(order.ref!, {
+          "orderDetails.status": initialStatus,
+          "orderDetails.orderStatus": initialStatus,
+          "orderDetails.updatedAt": new Date().toISOString()
+        });
+      }
+
       // Create tracking order data without userId if it's undefined
       const trackingOrderData: Omit<TrackingOrder, 'userId'> = {
         orderId: order.id,
@@ -192,7 +205,7 @@ export default function TrackingOrders() {
         })),
         paymentMethod: order.orderDetails.paymentMethod,
         paymentStatus: order.orderDetails.paymentStatus || "Pending",
-        orderStatus: order.orderDetails.status || "Order Placed",
+        orderStatus: order.orderDetails.orderStatus || order.orderDetails.status || initialStatus,
         pickupTime: order.orderDetails.pickupTime,
         pickupDate: order.orderDetails.pickupDate,
         totalAmount: order.orderDetails.totalAmount,
@@ -244,20 +257,11 @@ export default function TrackingOrders() {
             } as Order;
           })
         );
-        // Filter orders to exclude pending payments
-        const filteredOrders = orderList.filter(order => {
-          // For GCash payments, only show if payment is approved
-          if (order.orderDetails.paymentMethod === 'GCash') {
-            return order.orderDetails.paymentStatus === 'approved';
-          }
-          // For non-GCash payments, show all orders except pending ones
-          return order.orderDetails.paymentStatus !== 'pending';
-        });
 
-        // Save filtered orders to tracking_orders collection
-        await Promise.all(filteredOrders.map(order => saveTrackingOrder(order)));
+        // Save all orders to tracking_orders collection
+        await Promise.all(orderList.map(order => saveTrackingOrder(order)));
 
-        setOrders(filteredOrders);
+        setOrders(orderList);
         setLoading(false);
       },
       (error) => {
@@ -324,7 +328,11 @@ export default function TrackingOrders() {
               }
             }
 
-            const sizeStockData = sizeStock.data();
+            const sizeStockData = sizeStock.data() as DocumentData & {
+              slices: number;
+              variety?: string;
+              size?: string;
+            };
             if (sizeStockData.slices < item.productQuantity) {
               throw new Error(`Insufficient ${normalizedSize} stock. Available: ${sizeStockData.slices}, Needed: ${item.productQuantity}`);
             }
@@ -369,7 +377,11 @@ export default function TrackingOrders() {
                 throw new Error(`No stock found for variety: ${variety}`);
               }
 
-              const varietyData = varietyStock.data();
+              const varietyData = varietyStock.data() as DocumentData & {
+                slices: number;
+                variety?: string;
+                size?: string;
+              };
               if (varietyData.slices < totalSlicesNeeded) {
                 throw new Error(`Insufficient slices for variety: ${varietyData.variety}. Available: ${varietyData.slices}, Needed: ${totalSlicesNeeded}`);
               }
@@ -394,7 +406,7 @@ export default function TrackingOrders() {
             });
           }
         }
-
+        
         // STEP 2: Perform all writes after all reads are complete
         if (newStatus === "Ready for Pickup") {
           // Update all stocks
@@ -454,6 +466,7 @@ export default function TrackingOrders() {
         // Update order status
         transaction.update(orderRef, {
           "orderDetails.status": newStatus,
+          "orderDetails.orderStatus": newStatus,
           "orderDetails.updatedAt": new Date().toISOString(),
           ...(newStatus === "Completed" ? {
             "orderDetails.completedAt": new Date().toISOString()
@@ -547,16 +560,19 @@ export default function TrackingOrders() {
         }
       });
 
-      alert(newStatus === "Completed" 
-        ? "Order completed and sales recorded successfully!" 
-        : "Order status updated successfully!");
     } catch (error) {
       console.error("Error updating order status:", error);
-      alert(error instanceof Error ? error.message : "Failed to update order status");
     }
   };
 
   const filteredOrders = orders.filter((order) => {
+    // First check if it's a GCash payment that hasn't been approved
+    if (order.orderDetails.paymentMethod?.toLowerCase() === 'gcash' && 
+        order.orderDetails.paymentStatus !== 'approved') {
+      return false;
+    }
+
+    // Then apply search filter
     const matchesSearch =
       order.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (order.userDetails &&

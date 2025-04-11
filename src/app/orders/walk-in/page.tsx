@@ -76,7 +76,7 @@ const sizeConfigs: SizeConfig[] = [
     id: '6',
     name: '1/4 Slice',
     price: 140.00,
-    maxVarieties: 5,
+    maxVarieties: 1,
     minVarieties: 1,
     totalSlices: 12,
     allowedVarieties: VARIETIES
@@ -192,13 +192,18 @@ export default function WalkInOrders() {
     
     if (!sizeConfig) return;
 
+    if (sizeConfig.name === '1/4 Slice' && selectedOptions.length > 1) {
+      alert('1/4 Slice can only have 1 variety');
+      return;
+    }
+
     if (selectedOptions.length > sizeConfig.maxVarieties) {
       alert(`${sizeConfig.name} can only have up to ${sizeConfig.maxVarieties} varieties`);
       return;
     }
 
     if (selectedOptions.length < sizeConfig.minVarieties) {
-      alert(`${sizeConfig.name} must have at least ${sizeConfig.minVarieties} varieties`);
+      alert(`${sizeConfig.name} must have at least ${sizeConfig.minVarieties} variety`);
       return;
     }
 
@@ -260,7 +265,7 @@ export default function WalkInOrders() {
         customerName: customerName.trim(),
         orderDetails: {
           orderType: "walk-in",
-          status: paymentMethod === "Cash" ? "approved" : "pending",
+          status: "Order Confirmed",
           paymentMethod,
           paymentStatus: paymentMethod === "Cash" ? "approved" : "pending",
           gcashReference: paymentMethod === "GCash" ? gcashReference : null,
@@ -597,8 +602,10 @@ export default function WalkInOrders() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
                         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          order.orderDetails?.status === "completed" ? "bg-green-100 text-green-800" :
-                          order.orderDetails?.status === "pending" ? "bg-yellow-100 text-yellow-800" :
+                          order.orderDetails?.status === "Completed" ? "bg-green-100 text-green-800" :
+                          order.orderDetails?.status === "Order Confirmed" ? "bg-blue-100 text-blue-800" :
+                          order.orderDetails?.status === "Preparing Order" ? "bg-yellow-100 text-yellow-800" :
+                          order.orderDetails?.status === "Ready for Pickup" ? "bg-green-100 text-green-800" :
                           "bg-gray-100 text-gray-800"
                         }`}>
                           {order.orderDetails?.status || "unknown"}
