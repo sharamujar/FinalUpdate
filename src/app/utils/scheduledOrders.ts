@@ -47,17 +47,20 @@ export const SCHEDULED_STATUS_FLOW = [
   "Stock Reserved",
   "Preparing Order",
   "Ready for Pickup",
-  "Completed"
+  "Completed",
+  "Cancelled"
 ] as const;
 
-// Define status types
+// Define status flows
 export const regularStatusFlow = [
   "Order Confirmed",
   "Preparing Order",
   "Ready for Pickup",
-  "Completed"
+  "Completed",
+  "Cancelled"
 ] as const;
 
+// Define the status types
 export type RegularStatus = typeof regularStatusFlow[number];
 export type ScheduledStatus = typeof SCHEDULED_STATUS_FLOW[number];
 export type OrderStatus = RegularStatus | ScheduledStatus;

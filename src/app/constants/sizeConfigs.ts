@@ -62,7 +62,7 @@ export const sizeConfigs: Size[] = [
     },
     {
         id: '6',
-        name: '1/4',
+        name: '1/4 Slice',
         price: 140.00,
         maxVarieties: 1,
         minVarieties: 1,

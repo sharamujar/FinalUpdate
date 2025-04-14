@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { addDoc, collection, getDocs, updateDoc, doc, deleteDoc, query, orderBy, where, limit, getDoc } from "firebase/firestore";
+import { addDoc, collection, getDocs, updateDoc, doc, deleteDoc, query, orderBy, where, limit, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../../firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
 import { Line } from 'react-chartjs-2';
@@ -564,6 +564,7 @@ export default function Stock() {
                 lastUpdated: new Date().toISOString()
             };
 
+            // Create new stock with auto-generated ID
             const docRef = await addDoc(collection(db, "sizeStocks"), newStockData);
             await updateDoc(doc(db, "sizeStocks", docRef.id), { id: docRef.id });
 
@@ -574,7 +575,7 @@ export default function Stock() {
                 type: 'in',
                 slices: totalSlices,
                 previousSlices: 0,
-                newSlices: totalSlices,
+                newSlices: sizeStock.slices,
                 date: new Date(),
                 updatedBy: "Admin",
                 remarks: `Added ${sizeStock.slices} ${sizeStock.size} (${totalSlices} slices total)`,

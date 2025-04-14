@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar";
 import Head from "next/head";
 import { ReactNode } from "react";
 import { AuthProvider } from "./context/AuthContext";
+import { Toaster } from "react-hot-toast";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <main className="flex-1 ml-[18rem]">{children}</main>
           </div>
         </AuthProvider>
+        <Toaster position="top-right" />
       </body>
     </html>
   );

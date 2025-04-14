@@ -62,11 +62,13 @@ export default function Login() {
   };
 
   return (
-    <div className="h-screen grid grid-cols-2">
-      <div className="bg-bg-yellow"></div>
-      <div className="bg-bg-light-brown"></div>
-      <section className="absolute inset-0 flex justify-center items-center">
-        <div className="flex flex-col justify-center bg-white w-3/4 h-2/3 max-w-xl rounded-3xl p-10">
+    <div className="fixed inset-0">
+      <div className="absolute inset-0 grid grid-cols-2">
+        <div className="bg-bg-yellow"></div>
+        <div className="bg-bg-light-brown"></div>
+      </div>
+      <div className="relative z-10 h-full flex justify-center items-center">
+        <div className="flex flex-col justify-center bg-white rounded-3xl p-8 shadow-2xl w-[400px]">
           <div className="flex flex-col gap-1">
             <h1 className="text-sm text-bg-brown">
               Welcome to
@@ -77,13 +79,12 @@ export default function Login() {
               Enter your login details to continue
             </h3>
           </div>
-          <form className="flex flex-col justify-center"
-                onSubmit={handleLogin}>
-            <div className="flex flex-col gap-1 pt-8 pb-4">
+          <form className="flex flex-col justify-center" onSubmit={handleLogin}>
+            <div className="flex flex-col gap-1 pt-6 pb-3">
               <label className="text-xs font-extralight ml-3 text-bg-brown">Email Address</label>
               <input
                 type="email"
-                className={`w-full bg-transparent placeholder:text-slate-400 text-slate-700 text-sm border ${
+                className={`w-full bg-white/80 placeholder:text-slate-400 text-slate-700 text-sm border ${
                   emailError ? "border-red-500" : "border-slate-200"
                 } rounded-md px-3 py-2 transition duration-300 ease focus:outline-none focus:border-slate-400 hover:border-slate-300 shadow-sm focus:shadow`}
                 placeholder="Enter your email address"
@@ -98,7 +99,7 @@ export default function Login() {
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
-                  className={`w-full bg-transparent placeholder:text-slate-400 text-slate-700 text-sm border ${
+                  className={`w-full bg-white/80 placeholder:text-slate-400 text-slate-700 text-sm border ${
                     passwordError ? "border-red-500" : "border-slate-200"
                   } rounded-md px-3 py-2 transition duration-300 ease focus:outline-none focus:border-slate-400 hover:border-slate-300 shadow-sm focus:shadow`}
                   placeholder="Enter your password"
@@ -106,7 +107,6 @@ export default function Login() {
                   onChange={(e) => setPassword(e.target.value)}
                 />
 
-                {/* Eye Icon */}
                 <button
                   type="button"
                   className="absolute inset-y-0 right-3 flex items-center text-slate-400 hover:text-slate-600"
@@ -115,27 +115,27 @@ export default function Login() {
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
-
-              {/* password error message */}
               {passwordError && <p className="text-red-500 text-xs mt-1 ml-3">{passwordError}</p>}
             </div>
 
-            <div className="flex justify-end pt-2 pb-10">
-              <button className="text-xs font-bold underline text-bg-brown">
+            <div className="flex justify-end pt-2 pb-6">
+              <button 
+                type="button"
+                className="text-xs font-bold underline text-bg-brown hover:text-bg-light-brown transition-colors"
+              >
                 Forgot Password?
               </button>
             </div>
 
             <button
               className="w-full rounded-md bg-bg-light-brown py-2 px-4 border border-transparent font-bold text-center text-sm text-white transition-all shadow-md hover:shadow-lg focus:shadow-none active:bg-hover-light-brown hover:bg-hover-light-brown active:shadow-none disabled:pointer-events-none disabled:opacity-50 disabled:shadow-none"
-              type="button"
-              onClick={handleLogin}
+              type="submit"
             >
               LOGIN
             </button>
           </form>
         </div>
-      </section>
+      </div>
     </div>
   );
 }

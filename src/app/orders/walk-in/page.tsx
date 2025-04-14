@@ -265,9 +265,9 @@ export default function WalkInOrders() {
         customerName: customerName.trim(),
         orderDetails: {
           orderType: "walk-in",
-          status: "Order Confirmed",
+          status: "Pending Verification",
           paymentMethod,
-          paymentStatus: paymentMethod === "Cash" ? "approved" : "pending",
+          paymentStatus: "pending",
           gcashReference: paymentMethod === "GCash" ? gcashReference : null,
           totalAmount,
           createdAt: now,
@@ -289,27 +289,7 @@ export default function WalkInOrders() {
       };
 
       const orderDoc = await addDoc(orderRef, newOrder);
-
-      if (paymentMethod === "Cash") {
-        const salesRef = collection(db, "sales");
-        const saleData = {
-          orderId: orderDoc.id,
-          orderType: "walk-in",
-          customerName: customerName.trim(),
-          amount: totalAmount,
-          date: serverTimestamp(),
-          items: selectedProducts.map(p => ({
-            productSize: p.size,
-            productVariety: p.selectedVarieties.join(", "),
-            productQuantity: p.quantity,
-            productPrice: p.price
-          })),
-          paymentMethod,
-          status: "approved"
-        };
-        await addDoc(salesRef, saleData);
-      }
-
+      
       setSelectedProducts([]);
       setTotalAmount(0);
       setCustomerName("");
@@ -318,14 +298,10 @@ export default function WalkInOrders() {
       
       fetchWalkInOrders();
       
-      alert("Order created successfully!");
+      alert("Order created successfully! Please wait for payment verification.");
     } catch (error) {
       console.error("Error creating order:", error);
-      if (error instanceof Error) {
-        alert(`Failed to create order: ${error.message}`);
-      } else {
-        alert("Failed to create order. Please try again.");
-      }
+      alert("Error creating order. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -603,6 +579,7 @@ export default function WalkInOrders() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
                         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                           order.orderDetails?.status === "Completed" ? "bg-green-100 text-green-800" :
+                          order.orderDetails?.status === "Pending Verification" ? "bg-purple-100 text-purple-800" :
                           order.orderDetails?.status === "Order Confirmed" ? "bg-blue-100 text-blue-800" :
                           order.orderDetails?.status === "Preparing Order" ? "bg-yellow-100 text-yellow-800" :
                           order.orderDetails?.status === "Ready for Pickup" ? "bg-green-100 text-green-800" :

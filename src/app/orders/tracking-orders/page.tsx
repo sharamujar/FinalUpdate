@@ -19,9 +19,11 @@ import {
   runTransaction,
   Timestamp,
   FieldValue,
-  DocumentData
+  DocumentData,
+  setDoc
 } from "firebase/firestore";
 import Sidebar from "@/app/components/Sidebar";
+import { toast } from "react-hot-toast";
 
 // Import size configurations
 import { sizeConfigs } from "@/app/constants/sizeConfigs";
@@ -147,9 +149,34 @@ type RegularStatus = typeof regularStatusFlow[number];
 type ScheduledStatus = typeof SCHEDULED_STATUS_FLOW[number];
 type OrderStatus = RegularStatus | ScheduledStatus;
 
+// Add this helper function at the top of the file
+const getSlicesPerUnit = (size: string): number => {
+  switch (size) {
+    case 'Big Bilao': return 60;
+    case 'Tray': return 48;
+    case 'Small': return 30;
+    case 'Half Tray': return 24;
+    case 'Solo': return 20;
+    case '1/4 Slice': return 12;
+    default: return 0;
+  }
+};
+
+type CustomNotification = {
+  id: string;
+  message: string;
+  type: 'success' | 'error';
+  createdAt: Date;
+};
+
 export default function TrackingOrders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notifications, setNotifications] = useState<CustomNotification[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<OrderStatus>("Order Confirmed");
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isScheduled, setIsScheduled] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [showScheduled, setShowScheduled] = useState(false);
   const router = useRouter();
@@ -257,10 +284,11 @@ export default function TrackingOrders() {
 
     const setupSubscriptions = async () => {
       try {
-        // Subscribe to orders collection
     const ordersRef = collection(db, "orders");
         const ordersQuery = query(
           ordersRef,
+          where("orderDetails.paymentStatus", "==", "approved"),
+          where("orderDetails.status", "!=", "Pending Verification"),
           orderBy("orderDetails.createdAt", "desc")
         );
 
@@ -341,55 +369,224 @@ export default function TrackingOrders() {
   // Function to handle status updates
   const handleStatusUpdate = async (orderId: string, newStatus: OrderStatus) => {
     try {
-      const orderRef = doc(db, "orders", orderId);
-      const trackingOrdersRef = collection(db, "tracking_orders");
-      const q = query(trackingOrdersRef, where("orderId", "==", orderId));
+      // Set loading only for the specific order being updated
+      const orderElement = document.querySelector(`[data-order-id="${orderId}"]`);
+      if (orderElement) {
+        orderElement.classList.add('opacity-50');
+      }
 
-      await runTransaction(db, async (transaction) => {
-        // Get the order document
-        const orderDoc = await transaction.get(orderRef);
+        const orderRef = doc(db, "orders", orderId);
+      const orderDoc = await getDoc(orderRef);
+        
         if (!orderDoc.exists()) {
           throw new Error("Order not found");
         }
 
-        const orderData = orderDoc.data();
-        const isScheduled = orderData.orderDetails?.isScheduled;
+      const orderData = orderDoc.data();
+      const currentStatus = orderData.orderDetails.status;
 
-        // Update order status
-        transaction.update(orderRef, {
+      // Handle Stock Reserved status
+      if (newStatus === "Stock Reserved") {
+        try {
+          // Reserve stock for the order
+          const reservedStockIds = await reserveStock(
+            orderId,
+            orderData.items,
+            orderData.orderDetails.pickupDate,
+            orderData.orderDetails.pickupTime
+          );
+
+          // Update order with reserved stock IDs and new status
+          await updateDoc(orderRef, {
+            status: newStatus,
+            "orderDetails.status": newStatus,
+            "orderDetails.orderStatus": newStatus,
+            "orderDetails.reservedStockIds": reservedStockIds,
+            lastUpdated: new Date().toISOString(),
+            "orderDetails.updatedAt": new Date().toISOString()
+          });
+
+          // Update reserved stock status
+          await updateReservedStock(orderId, newStatus);
+        } catch (error) {
+          console.error("Error reserving stock:", error);
+          throw new Error("Failed to reserve stock. Please try again.");
+        }
+      } else if (newStatus === "Ready for Pickup") {
+        // Process each item in the order
+        for (const item of orderData.items) {
+          // Get size stock
+          const sizeStocksRef = collection(db, "sizeStocks");
+          const sizeStockQuery = query(sizeStocksRef, where("size", "==", item.productSize));
+          const sizeStockSnapshot = await getDocs(sizeStockQuery);
+          
+          if (sizeStockSnapshot.empty) {
+            throw new Error(`Size stock not found for ${item.productSize}`);
+          }
+
+          const sizeStockDoc = sizeStockSnapshot.docs[0];
+          const sizeStock = sizeStockDoc.data();
+          
+          // Check if enough size stock is available
+          if (sizeStock.slices < item.productQuantity) {
+            throw new Error(`Insufficient ${item.productSize} stock. Available: ${sizeStock.slices}, Required: ${item.productQuantity}`);
+          }
+
+          // Get variety stocks and check availability
+          const varietyStocksPromises = item.productVarieties.map(async (variety: string) => {
+            const varietyStockRef = collection(db, "varietyStocks");
+            // Get all variety stocks and filter case-insensitively
+            const varietySnapshot = await getDocs(varietyStockRef);
+            
+            // Find the matching variety document case-insensitively
+            const matchingDoc = varietySnapshot.docs.find(
+              doc => doc.data().variety.toLowerCase() === variety.toLowerCase()
+            );
+            
+            if (!matchingDoc) {
+              throw new Error(`Variety stock not found for ${variety}`);
+            }
+            
+                  return {
+              doc: matchingDoc,
+              data: matchingDoc.data()
+            };
+          });
+
+          const varietyStocks = await Promise.all(varietyStocksPromises);
+
+          // Calculate slices needed per variety
+          const sizeConfig = sizeConfigs.find(config => config.name === item.productSize);
+          if (!sizeConfig) {
+            throw new Error(`Size configuration not found for ${item.productSize}`);
+          }
+
+          const slicesPerVariety = Math.floor(sizeConfig.totalSlices / item.productVarieties.length);
+          const totalSlicesNeeded = slicesPerVariety * item.productQuantity;
+
+          // Check if enough variety stock is available
+          varietyStocks.forEach(({ data }) => {
+            if (data.slices < totalSlicesNeeded) {
+              throw new Error(`Insufficient slices for ${data.variety}. Available: ${data.slices}, Required: ${totalSlicesNeeded}`);
+            }
+          });
+
+          // Begin transaction
+          await runTransaction(db, async (transaction) => {
+            // Update size stock
+            const newSizeQuantity = sizeStock.slices - item.productQuantity;
+            transaction.update(sizeStockDoc.ref, {
+              slices: newSizeQuantity,
+              lastUpdated: new Date().toISOString()
+            });
+
+            // Record size stock history
+            const sizeHistoryRef = doc(collection(db, "stockHistory"));
+            transaction.set(sizeHistoryRef, {
+              stockId: sizeStockDoc.id,
+              size: item.productSize,
+              variety: '',
+              type: 'out',
+              slices: item.productQuantity,
+              previousSlices: sizeStock.slices,
+              newSlices: newSizeQuantity,
+              date: new Date(),
+              updatedBy: "Order System",
+              remarks: `Order pickup - Order ID: ${orderId} - Deducted ${item.productQuantity} ${item.productSize}`,
+              isDeleted: false
+            });
+
+            // Update variety stocks
+            varietyStocks.forEach(({ doc: varietyDoc, data }) => {
+              const newVarietySlices = data.slices - totalSlicesNeeded;
+              transaction.update(varietyDoc.ref, {
+                slices: newVarietySlices,
+                lastUpdated: new Date().toISOString()
+              });
+
+              // Record variety stock history
+              const varietyHistoryRef = doc(collection(db, "stockHistory"));
+              transaction.set(varietyHistoryRef, {
+                stockId: varietyDoc.id,
+                size: item.productSize,
+                variety: data.variety,
+                type: 'out',
+                slices: totalSlicesNeeded,
+                previousSlices: data.slices,
+                newSlices: newVarietySlices,
+                date: new Date(),
+                updatedBy: "Order System",
+                remarks: `Order pickup - Order ID: ${orderId} - Deducted ${totalSlicesNeeded} slices`,
+                isDeleted: false
+              });
+            });
+          });
+        }
+
+        // Update order status after all items are processed
+        await updateDoc(orderRef, {
+          status: newStatus,
           "orderDetails.status": newStatus,
           "orderDetails.orderStatus": newStatus,
+          lastUpdated: new Date().toISOString(),
+          "orderDetails.updatedAt": new Date().toISOString()
+        });
+      } else if (newStatus === "Completed") {
+        // For completed orders, update status and sales data
+        await updateDoc(orderRef, {
+          status: newStatus,
+          "orderDetails.status": newStatus,
+          "orderDetails.orderStatus": newStatus,
+          lastUpdated: new Date().toISOString(),
           "orderDetails.updatedAt": new Date().toISOString()
         });
 
-        // Update tracking order status
-        const trackingSnapshot = await getDocs(q);
-        trackingSnapshot.docs.forEach((doc) => {
-          transaction.update(doc.ref, {
-            orderStatus: newStatus,
-            updatedAt: Timestamp.now()
-          });
+        // Update sales data
+        await updateSalesData(orderData);
+
+        // Release reserved stock if it was a scheduled order
+        if (orderData.orderDetails.isScheduled) {
+          await releaseReservedStock(orderId, newStatus);
+        }
+      } else if (newStatus === "Cancelled") {
+        // Release reserved stock if it was a scheduled order
+        if (orderData.orderDetails.isScheduled) {
+          await releaseReservedStock(orderId, newStatus);
+        }
+        
+        await updateDoc(orderRef, {
+          status: newStatus,
+          "orderDetails.status": newStatus,
+          "orderDetails.orderStatus": newStatus,
+          lastUpdated: new Date().toISOString(),
+          "orderDetails.updatedAt": new Date().toISOString()
+        });
+      } else {
+        // For other status changes
+        await updateDoc(orderRef, {
+          status: newStatus,
+          "orderDetails.status": newStatus,
+          "orderDetails.orderStatus": newStatus,
+          lastUpdated: new Date().toISOString(),
+          "orderDetails.updatedAt": new Date().toISOString()
         });
 
-        // Handle reserved stock updates for scheduled orders
-        if (isScheduled) {
-          if (newStatus === "Completed") {
-            // Release reserved stock and deduct from actual inventory
-            await releaseReservedStock(orderId, newStatus);
-            // Handle inventory deduction here
-            await handleInventoryDeduction(orderData.items);
-          } else {
-            // Update reserved stock status
-            await updateReservedStock(orderId, newStatus);
-          }
-        } else if (newStatus === "Completed") {
-          // For regular orders, just deduct from inventory
-          await handleInventoryDeduction(orderData.items);
+        // Update reserved stock status if it exists
+        if (orderData.orderDetails.isScheduled && orderData.orderDetails.reservedStockIds?.length > 0) {
+          await updateReservedStock(orderId, newStatus);
         }
-      });
+      }
+
+      toast.success("Order status updated successfully");
     } catch (error) {
       console.error("Error updating order status:", error);
-      throw error;
+      toast.error(error instanceof Error ? error.message : "Failed to update order status");
+    } finally {
+      // Remove loading state from the specific order
+      const orderElement = document.querySelector(`[data-order-id="${orderId}"]`);
+      if (orderElement) {
+        orderElement.classList.remove('opacity-50');
+      }
     }
   };
 
@@ -498,13 +695,37 @@ export default function TrackingOrders() {
   });
 
   // Get available statuses based on current status and order type
-  const getAvailableStatuses = (currentStatus: string, isScheduled: boolean): OrderStatus[] => {
+  const getAvailableStatuses = (currentStatus: OrderStatus, isScheduled: boolean): OrderStatus[] => {
     if (isScheduled) {
-      const currentIndex = SCHEDULED_STATUS_FLOW.indexOf(currentStatus as ScheduledStatus);
-      return currentIndex >= 0 ? SCHEDULED_STATUS_FLOW.slice(currentIndex + 1) as OrderStatus[] : [];
+      switch (currentStatus) {
+        case "Order Confirmed":
+          return ["Stock Reserved", "Preparing Order", "Ready for Pickup", "Completed", "Cancelled"];
+        case "Stock Reserved":
+          return ["Preparing Order", "Ready for Pickup", "Completed", "Cancelled"];
+        case "Preparing Order":
+          return ["Ready for Pickup", "Completed", "Cancelled"];
+        case "Ready for Pickup":
+          return ["Completed", "Cancelled"];
+        case "Completed":
+        case "Cancelled":
+          return [];
+        default:
+          return ["Order Confirmed", "Stock Reserved", "Preparing Order", "Ready for Pickup", "Completed", "Cancelled"];
+      }
     } else {
-      const currentIndex = regularStatusFlow.indexOf(currentStatus as RegularStatus);
-      return currentIndex >= 0 ? regularStatusFlow.slice(currentIndex + 1) as OrderStatus[] : [];
+      switch (currentStatus) {
+        case "Order Confirmed":
+          return ["Preparing Order", "Ready for Pickup", "Completed", "Cancelled"];
+        case "Preparing Order":
+          return ["Ready for Pickup", "Completed", "Cancelled"];
+        case "Ready for Pickup":
+          return ["Completed", "Cancelled"];
+        case "Completed":
+        case "Cancelled":
+          return [];
+        default:
+          return ["Order Confirmed", "Preparing Order", "Ready for Pickup", "Completed", "Cancelled"];
+      }
     }
   };
 
@@ -543,6 +764,59 @@ export default function TrackingOrders() {
       month: "long",
       day: "numeric",
     });
+  };
+
+  // Update the updateSalesData function to be more robust
+  const updateSalesData = async (orderData: any) => {
+    try {
+      const salesRef = doc(db, "sales", "summary");
+      const salesDoc = await getDoc(salesRef);
+      
+      // Use current date as completion date when order is marked as completed
+      const completionDate = new Date();
+      const month = completionDate.getMonth() + 1;
+      const year = completionDate.getFullYear();
+      const monthKey = `${year}-${month.toString().padStart(2, '0')}`;
+      const dayKey = `${year}-${month.toString().padStart(2, '0')}-${completionDate.getDate().toString().padStart(2, '0')}`;
+      
+      // Ensure we have valid numbers
+      const orderAmount = Number(orderData.orderDetails.totalAmount) || 0;
+      
+      if (!salesDoc.exists()) {
+        // Initialize the sales document if it doesn't exist
+        await setDoc(salesRef, {
+          totalSales: orderAmount,
+          monthlySales: { [monthKey]: orderAmount },
+          dailySales: { [dayKey]: orderAmount },
+          totalOrders: 1,
+          monthlyOrders: { [monthKey]: 1 },
+          dailyOrders: { [dayKey]: 1 },
+          lastUpdated: new Date().toISOString()
+        });
+      } else {
+        const salesData = salesDoc.data();
+        // Update sales summary with proper type checking
+        await updateDoc(salesRef, {
+          totalSales: Number(salesData.totalSales || 0) + orderAmount,
+          [`monthlySales.${monthKey}`]: Number(salesData.monthlySales?.[monthKey] || 0) + orderAmount,
+          [`dailySales.${dayKey}`]: Number(salesData.dailySales?.[dayKey] || 0) + orderAmount,
+          totalOrders: Number(salesData.totalOrders || 0) + 1,
+          [`monthlyOrders.${monthKey}`]: Number(salesData.monthlyOrders?.[monthKey] || 0) + 1,
+          [`dailyOrders.${dayKey}`]: Number(salesData.dailyOrders?.[dayKey] || 0) + 1,
+          lastUpdated: new Date().toISOString()
+        });
+      }
+
+      console.log('Sales data updated successfully:', {
+        orderAmount,
+        monthKey,
+        dayKey,
+        completionDate
+      });
+    } catch (error) {
+      console.error("Error updating sales data:", error);
+      throw new Error("Failed to update sales data");
+    }
   };
 
   return (
@@ -599,7 +873,7 @@ export default function TrackingOrders() {
                       Order Status
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Actions
+                      Pickup Details
                     </th>
                   </tr>
                 </thead>
@@ -620,7 +894,7 @@ export default function TrackingOrders() {
                     </tr>
                   ) : (
                     filteredOrders.map((order) => (
-                      <tr key={order.id} className="hover:bg-gray-50">
+                      <tr key={order.id} data-order-id={order.id} className="hover:bg-gray-50">
                         <td className="px-6 py-4">
                           <div className="text-sm font-medium text-gray-900">
                             #{order.id.slice(0, 6)}
@@ -665,7 +939,7 @@ export default function TrackingOrders() {
                               {order.orderDetails.status}
                             </option>
                             {getAvailableStatuses(
-                              order.orderDetails.status,
+                              order.orderDetails.status as OrderStatus,
                               order.orderDetails.isScheduled || false
                             ).map((status) => (
                               <option key={status} value={status}>
@@ -675,12 +949,25 @@ export default function TrackingOrders() {
                           </select>
                         </td>
                         <td className="px-6 py-4">
+                          <div className="space-y-1">
+                            <div className="text-sm font-medium text-gray-900">
+                              Date: {new Date(order.orderDetails.pickupDate).toLocaleDateString()}
+                            </div>
+                            <div className="text-sm text-gray-600">
+                              Time: {order.orderDetails.pickupTime}
+                            </div>
+                            {order.orderDetails.isScheduled && (
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                Scheduled Order
+                              </span>
+                            )}
                           <button
                             onClick={() => router.push(`/orders/${order.id}`)}
-                            className="text-blue-600 hover:text-blue-900 text-sm font-medium"
+                              className="mt-2 text-sm text-blue-600 hover:text-blue-900 font-medium block"
                           >
-                            View Details
+                              View Details →
                           </button>
+                          </div>
                         </td>
                       </tr>
                     ))

@@ -10,10 +10,18 @@ import {
   getDoc,
   where,
   onSnapshot,
+  addDoc,
 } from "firebase/firestore";
 import { db } from "@/app/firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
 import Sidebar from "@/app/components/Sidebar";
+
+interface OrderItem {
+  productSize: string;
+  productVarieties: string[];
+  productQuantity: number;
+  productPrice: number;
+}
 
 interface Order {
   id: string;
@@ -30,15 +38,10 @@ interface Order {
     paymentMethod: string;
     paymentStatus?: string;
     gcashReference?: string;
+    gcashScreenshotUrl?: string;
     createdAt: string;
   };
-  items: Array<{
-    cartId: string;
-    productSize: string;
-    productVarieties: string[];
-    productQuantity: number;
-    productPrice: number;
-  }>;
+  items: OrderItem[];
 }
 
 export default function PendingVerificationPage() {
@@ -46,6 +49,7 @@ export default function PendingVerificationPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   // Function to fetch user details
   const fetchUserDetails = async (userId: string | undefined) => {
@@ -93,24 +97,73 @@ export default function PendingVerificationPage() {
   const updatePaymentStatus = async (orderId: string, newStatus: string) => {
     try {
       const orderRef = doc(db, "orders", orderId);
-      await updateDoc(orderRef, {
-        "orderDetails.paymentStatus": newStatus,
-        "orderDetails.updatedAt": new Date().toISOString(),
-      });
+      
+      // When approving payment, update order status and create sales record
+      if (newStatus === "approved") {
+        const orderDoc = await getDoc(orderRef);
+        const orderData = orderDoc.data();
 
-      setOrders((prevOrders) =>
-        prevOrders.map((o) =>
-          o.id === orderId
-            ? {
-                ...o,
-                orderDetails: {
-                  ...o.orderDetails,
-                  paymentStatus: newStatus,
-                },
-              }
-            : o
-        )
-      );
+        // Update order status
+        await updateDoc(orderRef, {
+          "orderDetails.paymentStatus": newStatus,
+          "orderDetails.status": "Order Confirmed",
+          "orderDetails.updatedAt": new Date().toISOString(),
+        });
+
+        // Create sales record
+        const salesRef = collection(db, "sales");
+        const saleData = {
+          orderId: orderId,
+          orderType: orderData?.orderType || "walk-in",
+          customerName: orderData?.customerName || "Walk-in Customer",
+          amount: orderData?.orderDetails?.totalAmount || 0,
+          date: new Date(),
+          items: (orderData?.items as OrderItem[] || []).map(item => ({
+            productSize: item.productSize,
+            productVariety: item.productVarieties.join(", "),
+            productQuantity: item.productQuantity,
+            productPrice: item.productPrice
+          })),
+          paymentMethod: orderData?.orderDetails?.paymentMethod || "Cash",
+          status: "approved"
+        };
+        await addDoc(salesRef, saleData);
+
+        setOrders((prevOrders) =>
+          prevOrders.map((o) =>
+            o.id === orderId
+              ? {
+                  ...o,
+                  orderDetails: {
+                    ...o.orderDetails,
+                    paymentStatus: newStatus,
+                    status: "Order Confirmed",
+                  },
+                }
+              : o
+          )
+        );
+      } else {
+        // For rejection, just update payment status
+        await updateDoc(orderRef, {
+          "orderDetails.paymentStatus": newStatus,
+          "orderDetails.updatedAt": new Date().toISOString(),
+        });
+
+        setOrders((prevOrders) =>
+          prevOrders.map((o) =>
+            o.id === orderId
+              ? {
+                  ...o,
+                  orderDetails: {
+                    ...o.orderDetails,
+                    paymentStatus: newStatus,
+                  },
+                }
+              : o
+          )
+        );
+      }
     } catch (err) {
       console.error("Error updating payment status:", err);
       setError("Failed to update payment status. Please try again.");
@@ -120,12 +173,10 @@ export default function PendingVerificationPage() {
   // Fetch orders from Firestore
   useEffect(() => {
     const ordersRef = collection(db, "orders");
-    // First, let's log what we're querying for
-    console.log("Setting up GCash orders query");
+    console.log("Setting up orders query for payment verification");
 
     const q = query(
       ordersRef,
-      where("orderDetails.paymentMethod", "in", ["GCash", "gcash", "GCASH"]),
       orderBy("orderDetails.createdAt", "desc")
     );
 
@@ -136,26 +187,55 @@ export default function PendingVerificationPage() {
         const ordersList = await Promise.all(
           querySnapshot.docs.map(async (doc) => {
             const data = doc.data();
-            console.log("Order data:", data);  // Log each order's data
-            const userDetails = await fetchUserDetails(data.userId);
+            console.log("Raw order data:", {
+              paymentMethod: data.orderDetails?.paymentMethod,
+              gcashReference: data.orderDetails?.gcashReference,
+              gcashScreenshotUrl: data.orderDetails?.gcashScreenshotUrl
+            });
+
+            // Skip orders that don't need verification
+            if (data.orderDetails?.paymentStatus !== "pending") {
+              return null;
+            }
+
+            let userDetails = null;
+            // Only fetch user details for non-walk-in orders
+            if (data.orderType !== "walk-in") {
+              userDetails = await fetchUserDetails(data.userId);
+            } else {
+              // For walk-in orders, use customerName
+              userDetails = {
+                firstName: data.customerName || "Walk-in",
+                lastName: "Customer"
+              };
+            }
+
             return {
               id: doc.id,
               userId: data.userId,
+              orderType: data.orderType || "walk-in",
               orderDetails: {
                 ...data.orderDetails,
-                paymentMethod: data.orderDetails?.paymentMethod || "GCash",
-                paymentStatus: data.orderDetails?.paymentStatus || "pending",
+                paymentMethod: data.orderDetails?.paymentMethod || "Cash",
+                paymentStatus: "pending",
+                status: "Pending Verification",
                 totalAmount: data.orderDetails?.totalAmount || 0,
                 gcashReference: data.orderDetails?.gcashReference || "N/A",
+                gcashScreenshotUrl: data.orderDetails?.gcashScreenshotUrl || null,
                 createdAt: data.orderDetails?.createdAt || new Date().toISOString(),
+                pickupDate: data.orderDetails?.pickupDate || new Date().toISOString(),
+                pickupTime: data.orderDetails?.pickupTime || new Date().toLocaleTimeString()
               },
               items: data.items || [],
               userDetails,
             } as Order;
           })
         );
-        console.log("Processed orders:", ordersList);  // Log processed orders
-        setOrders(ordersList);
+
+        // Filter out null values (orders that don't need verification)
+        const filteredOrders = ordersList.filter(order => order !== null) as Order[];
+        console.log("Processed orders:", filteredOrders);
+        setOrders(filteredOrders);
         setIsLoading(false);
         setError(null);
       },
@@ -189,6 +269,31 @@ export default function PendingVerificationPage() {
     });
   };
 
+  // Add this new component for the image modal
+  const ImageModal = ({ imageUrl, onClose }: { imageUrl: string; onClose: () => void }) => {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="relative bg-white rounded-lg w-full max-w-4xl aspect-[4/3] flex items-center justify-center">
+          <button
+            onClick={onClose}
+            className="absolute top-2 right-2 text-gray-500 hover:text-gray-700 bg-white rounded-full p-1 shadow-md z-10"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <div className="relative w-full h-full p-4">
+            <img 
+              src={imageUrl} 
+              alt="GCash Payment Screenshot" 
+              className="w-full h-full object-contain"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <ProtectedRoute>
       <div className="flex min-h-screen bg-gray-100">
@@ -215,6 +320,16 @@ export default function PendingVerificationPage() {
             </div>
           )}
 
+          {selectedImage && (
+            <ImageModal 
+              imageUrl={selectedImage} 
+              onClose={() => {
+                console.log("Closing modal");
+                setSelectedImage(null);
+              }} 
+            />
+          )}
+
           <div className="bg-white rounded-lg shadow-md overflow-hidden">
             <div className="overflow-x-auto w-full">
               <table className="min-w-full divide-y divide-gray-200">
@@ -228,6 +343,9 @@ export default function PendingVerificationPage() {
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Total Amount
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Payment Method
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Reference Number
@@ -279,9 +397,36 @@ export default function PendingVerificationPage() {
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <div className="text-sm text-gray-900">
-                            {order.orderDetails.gcashReference || "N/A"}
-                          </div>
+                          <span className="px-2 py-1 text-sm text-blue-800 bg-blue-100 rounded-full">
+                            {order.orderDetails.paymentMethod}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          {(() => {
+                            console.log("Rendering order:", {
+                              paymentMethod: order.orderDetails.paymentMethod,
+                              gcashReference: order.orderDetails.gcashReference,
+                              gcashScreenshotUrl: order.orderDetails.gcashScreenshotUrl
+                            });
+                            return (
+                              <div className="text-sm text-gray-900">
+                                {order.orderDetails.gcashReference || "N/A"}
+                                {order.orderDetails.paymentMethod.toLowerCase() === "gcash" && 
+                                 order.orderDetails.gcashReference === "SCREENSHOT_UPLOADED" &&
+                                 order.orderDetails.gcashScreenshotUrl && (
+                                  <button
+                                    onClick={() => {
+                                      console.log("Screenshot URL:", order.orderDetails.gcashScreenshotUrl);
+                                      setSelectedImage(order.orderDetails.gcashScreenshotUrl || null);
+                                    }}
+                                    className="ml-2 text-blue-600 hover:text-blue-800"
+                                  >
+                                    View Screenshot
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="px-6 py-4">
                           <span className={`px-2 py-1 text-xs font-medium rounded-full ${

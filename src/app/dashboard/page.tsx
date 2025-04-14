@@ -5,7 +5,7 @@ import { signOut } from "firebase/auth";
 import { auth } from "../firebase-config";
 import ProtectedRoute from "@/app/components/protectedroute";
 import { useEffect, useState } from "react";
-import { collection, getDocs, query, where, orderBy, limit, Timestamp } from "firebase/firestore";
+import { collection, getDocs, query, where, orderBy, limit, Timestamp, doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase-config"; // Adjust the import based on your setup
 import { Line, Bar } from 'react-chartjs-2';
 import {
@@ -119,8 +119,8 @@ interface OrderData {
     isWalkin: boolean;
   };
   userDetails?: {
-    firstName: string;
-    lastName: string;
+  firstName: string;
+  lastName: string;
   };
   customerDetails?: {
     name: string;
@@ -239,89 +239,100 @@ export default function Dashboard() {
 
   const fetchSalesData = async () => {
     try {
-      const salesRef = collection(db, "orders");
-      const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const weekStart = new Date(now);
-      weekStart.setDate(now.getDate() - 7);
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const ordersRef = collection(db, "orders");
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
       
-      // Daily sales
-      const dailyQuery = query(
-        salesRef,
+      const weekAgo = new Date(today);
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      
+      // Calculate last month's date range
+      const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0, 23, 59, 59);
+      
+      // Query for completed orders only
+      const completedOrdersQuery = query(
+        ordersRef,
         where("orderDetails.status", "==", "Completed"),
-        where("orderDetails.completedAt", ">=", today.toISOString())
+        where("orderDetails.paymentStatus", "==", "approved"),
+        orderBy("orderDetails.updatedAt", "desc")
       );
-      const dailySnapshot = await getDocs(dailyQuery);
-      const dailySales = dailySnapshot.docs.reduce((acc, doc) => {
-        const data = doc.data();
-        return acc + data.orderDetails.totalAmount;
-      }, 0);
 
-      // Weekly sales
-      const weeklyQuery = query(
-        salesRef,
-        where("orderDetails.status", "==", "Completed"),
-        where("orderDetails.completedAt", ">=", weekStart.toISOString())
-      );
-      const weeklySnapshot = await getDocs(weeklyQuery);
-      const weeklySales = weeklySnapshot.docs.reduce((acc, doc) => {
-        const data = doc.data();
-        return acc + data.orderDetails.totalAmount;
-      }, 0);
-
-      // Monthly sales
-      const monthlyQuery = query(
-        salesRef,
-        where("orderDetails.status", "==", "Completed"),
-        where("orderDetails.completedAt", ">=", monthStart.toISOString())
-      );
-      const monthlySnapshot = await getDocs(monthlyQuery);
-      const monthlySales = monthlySnapshot.docs.reduce((acc, doc) => {
-        const data = doc.data();
-        return acc + data.orderDetails.totalAmount;
-      }, 0);
-
-      setSalesData({ daily: dailySales, weekly: weeklySales, monthly: monthlySales, trend: [] });
-      setTotalRevenue(monthlySales);
-
-      // Prepare sales trend data
-      const last7DaysData = [];
-      for (let i = 6; i >= 0; i--) {
+      const querySnapshot = await getDocs(completedOrdersQuery);
+      
+      let dailyTotal = 0;
+      let weeklyTotal = 0;
+      let monthlyTotal = 0;
+      
+      // Initialize last 7 days data
+      const last7Days = Array.from({ length: 7 }, (_, i) => {
         const date = new Date();
         date.setDate(date.getDate() - i);
         date.setHours(0, 0, 0, 0);
-        const nextDate = new Date(date);
-        nextDate.setDate(date.getDate() + 1);
+        return {
+          date: date.toISOString().split('T')[0],
+          total: 0
+        };
+      }).reverse();
 
-        const dayQuery = query(
-          salesRef,
-          where("orderDetails.status", "==", "Completed"),
-          where("orderDetails.completedAt", ">=", date.toISOString()),
-          where("orderDetails.completedAt", "<", nextDate.toISOString())
-        );
-        const daySnapshot = await getDocs(dayQuery);
-        const dayTotal = daySnapshot.docs.reduce((acc, doc) => {
-          const data = doc.data();
-          return acc + data.orderDetails.totalAmount;
-        }, 0);
+      querySnapshot.forEach((doc) => {
+        const orderData = doc.data();
+        const completedDate = new Date(orderData.orderDetails.updatedAt);
+        completedDate.setHours(0, 0, 0, 0);
         
-        last7DaysData.push({
-          date: date.toLocaleDateString('en-US', { weekday: 'short' }),
-          amount: dayTotal
-        });
-      }
+        const amount = orderData.orderDetails.totalAmount || 0;
+
+        // Check if order was completed today
+        if (completedDate.getTime() === today.getTime()) {
+          dailyTotal += amount;
+        }
+
+        // Check if order was completed in the last 7 days
+        if (completedDate >= weekAgo) {
+          weeklyTotal += amount;
+
+          // Add to daily chart data
+          const dateStr = completedDate.toISOString().split('T')[0];
+          const dayIndex = last7Days.findIndex(day => day.date === dateStr);
+          if (dayIndex !== -1) {
+            last7Days[dayIndex].total += amount;
+          }
+        }
+
+        // Check if order was completed in the last month
+        if (completedDate >= lastMonthStart && completedDate <= lastMonthEnd) {
+          monthlyTotal += amount;
+        }
+      });
+
+      setSalesData({
+        daily: dailyTotal,
+        weekly: weeklyTotal,
+        monthly: monthlyTotal,
+        trend: last7Days.map(day => ({
+          date: day.date,
+          sales: day.total
+        }))
+      });
+
+      // Format data for the chart
+      const chartData = last7Days.map(day => ({
+        name: new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' }),
+        amount: day.total
+      }));
 
       setSalesChartData({
-        labels: last7DaysData.map(d => d.date),
+        labels: chartData.map(d => d.name),
         datasets: [{
           label: 'Daily Sales',
-          data: last7DaysData.map(d => d.amount),
+          data: chartData.map(d => d.amount),
           borderColor: 'rgb(75, 192, 192)',
           backgroundColor: 'rgba(75, 192, 192, 0.5)',
           tension: 0.1
         }]
       });
+
+      setTotalRevenue(monthlyTotal);
 
     } catch (error) {
       console.error("Error fetching sales data:", error);
@@ -336,70 +347,88 @@ export default function Dashboard() {
 
   const fetchPopularProducts = async () => {
     try {
-      const ordersRef = collection(db, "orders");
-      const ordersQuery = query(
-        ordersRef,
-        where("orderDetails.status", "==", "Completed"),
-        orderBy("orderDetails.completedAt", "desc")
-      );
-      const ordersSnapshot = await getDocs(ordersQuery);
+      // Get data from both orders and sales collections
+      const [ordersSnapshot, salesSnapshot] = await Promise.all([
+        getDocs(query(
+          collection(db, "orders"),
+          where("orderDetails.status", "==", "Completed")
+        )),
+        getDocs(collection(db, "sales"))
+      ]);
       
       // Aggregate product sales by variety
       const varietySales = new Map();
       
+      // Process completed orders
       ordersSnapshot.docs.forEach(doc => {
         const orderData = doc.data();
-        if (!orderData.items) return;
+        if (!orderData.items || !Array.isArray(orderData.items)) return;
         
         orderData.items.forEach((item: any) => {
-          // For each variety in the item
-          if (item.productVarieties && Array.isArray(item.productVarieties)) {
-            item.productVarieties.forEach((variety: string) => {
-              if (!varietySales.has(variety)) {
-                varietySales.set(variety, {
-                  name: variety,
-                  totalSlices: 0,
+          if (!item.productVarieties || !Array.isArray(item.productVarieties)) return;
+          
+          const quantity = Number(item.productQuantity) || 0;
+          const price = Number(item.productPrice) || 0;
+          
+          item.productVarieties.forEach((variety: string) => {
+            if (!variety) return;
+            
+            if (!varietySales.has(variety)) {
+              varietySales.set(variety, {
+                name: variety,
+                quantity: 0,
+                revenue: 0
+              });
+            }
+            
+            const product = varietySales.get(variety);
+            product.quantity += quantity;
+            product.revenue += price * quantity;
+          });
+        });
+      });
+
+      // Process sales collection
+      salesSnapshot.docs.forEach(doc => {
+        const saleData = doc.data();
+        if (!saleData.variety) return;
+
+        const quantity = Number(saleData.quantity) || 0;
+        const amount = Number(saleData.amount) || 0;
+        
+        if (!varietySales.has(saleData.variety)) {
+          varietySales.set(saleData.variety, {
+            name: saleData.variety,
+            quantity: 0,
               revenue: 0
             });
           }
-              const product = varietySales.get(variety);
-              // Calculate slices based on size
-              let slicesPerUnit = 0;
-              switch(item.productSize) {
-                case 'Big Bilao': slicesPerUnit = 60; break;
-                case 'Tray': slicesPerUnit = 48; break;
-                case 'Small': slicesPerUnit = 30; break;
-                case 'Half Tray': slicesPerUnit = 24; break;
-                case 'Solo': slicesPerUnit = 20; break;
-                case '1/4 Slice': slicesPerUnit = 12; break;
-                default: slicesPerUnit = 0;
-              }
-              // Add slices and revenue for this order
-              const totalSlices = (slicesPerUnit * item.productQuantity) / item.productVarieties.length;
-              product.totalSlices += totalSlices;
-              product.revenue += (item.productPrice * item.productQuantity) / item.productVarieties.length;
-            });
-          }
-        });
+        
+        const product = varietySales.get(saleData.variety);
+        product.quantity += quantity;
+        product.revenue += amount;
       });
 
       // Convert to array and sort based on selected criteria
       const popularProducts = Array.from(varietySales.values())
         .sort((a, b) => productSortBy === 'quantity' ? 
-          b.totalSlices - a.totalSlices : 
+          b.quantity - a.quantity : 
           b.revenue - a.revenue)
         .slice(0, 5);
 
-      setPopularProducts(popularProducts);
+      setPopularProducts(popularProducts.map(p => ({
+        ...p,
+        totalSlices: p.quantity // Map quantity to totalSlices for compatibility
+      })));
 
-      // Update product chart
+      // Update product chart with proper data formatting
       const chartData = {
         labels: popularProducts.map(p => p.name),
         datasets: [{
-          label: productSortBy === 'quantity' ? 'Slices Sold' : 'Revenue (₱)',
+          label: productSortBy === 'quantity' ? 'Products Sold' : 'Revenue (₱)',
           data: popularProducts.map(p => 
             productSortBy === 'quantity' ? 
-              Math.round(p.totalSlices) : 
+              Math.round(p.quantity) : 
               Math.round(p.revenue)
           ),
           backgroundColor: [
@@ -421,6 +450,8 @@ export default function Dashboard() {
       };
       
       setProductChartData(chartData);
+      
+      console.log('Popular products data:', popularProducts);
       
     } catch (error) {
       console.error("Error fetching popular products:", error);
@@ -740,29 +771,19 @@ export default function Dashboard() {
   const checkNewOrders = async () => {
     try {
       const ordersRef = collection(db, "orders");
-      const pendingOrdersQuery = query(
+      const ordersQuery = query(
         ordersRef,
-        where("orderDetails.status", "in", ["Order Confirmed", "Preparing Order", "Ready for Pickup"]),
+        where("orderDetails.paymentStatus", "in", ["pending", "approved"]),
         orderBy("orderDetails.createdAt", "desc")
       );
       
-      const mobileOrdersQuery = query(
-        ordersRef,
-        where("orderDetails.orderStatus", "in", ["Order Confirmed", "Preparing Order", "Ready for Pickup"]),
-        orderBy("orderDetails.createdAt", "desc")
-      );
-      
-      const [snapshot, mobileSnapshot] = await Promise.all([
-        getDocs(pendingOrdersQuery),
-        getDocs(mobileOrdersQuery)
-      ]);
+      const snapshot = await getDocs(ordersQuery);
       
       // Create a map of current order statuses
       const currentOrders = new Map();
       
-      // Process orders with orderDetails.status
       snapshot.docs.forEach(doc => {
-        const orderData = doc.data() as OrderData;
+        const orderData = doc.data();
         const orderId = doc.id;
         let customerName;
         
@@ -776,83 +797,41 @@ export default function Dashboard() {
             : orderData.customerName || "Customer";
         }
         
-        const status = orderData.orderDetails.status;
-        const message = `Order #${orderId.slice(0, 6)} - ${customerName} (${status})`;
+        const paymentStatus = orderData.orderDetails?.paymentStatus;
+        const orderStatus = orderData.orderDetails?.status;
         
-        currentOrders.set(orderId, {
-          id: `order-${orderId}`,
-          message,
-          type: 'warning',
-          orderId,
-          createdAt: new Date(orderData.orderDetails.createdAt),
-          isOrderNotification: true
-        });
-      });
-      
-      // Process orders with orderDetails.orderStatus
-      mobileSnapshot.docs.forEach(doc => {
-        const orderData = doc.data() as OrderData;
-        const orderId = doc.id;
+        // Create notification message based on order status
+        let message;
+        let type;
         
-        // Skip if we already processed this order
-        if (currentOrders.has(orderId)) return;
-        
-        let customerName;
-        
-        // Check if it's a walk-in order
-        if (orderData.orderType === "walk-in") {
-          customerName = orderData.customerName || "Walk-in Customer";
-        } else {
-          // For registered users
-          customerName = orderData.userDetails?.firstName && orderData.userDetails?.lastName
-            ? `${orderData.userDetails.firstName} ${orderData.userDetails.lastName}`
-            : orderData.customerName || "Customer";
+        if (paymentStatus === "pending") {
+          message = `New order needs verification - ${customerName}`;
+          type = "warning";
+        } else if (orderStatus === "Order Confirmed") {
+          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Confirmed)`;
+          type = "info";
+        } else if (orderStatus === "Preparing Order") {
+          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Preparing)`;
+          type = "info";
+        } else if (orderStatus === "Ready for Pickup") {
+          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Ready)`;
+          type = "success";
         }
         
-        const status = orderData.orderDetails.orderStatus;
-        const message = `Order #${orderId.slice(0, 6)} - ${customerName} (${status})`;
-        
-        currentOrders.set(orderId, {
-          id: `order-${orderId}`,
-          message,
-          type: 'warning',
-          orderId,
-          createdAt: new Date(orderData.orderDetails.createdAt),
-          isOrderNotification: true
-        });
+        if (message) {
+          currentOrders.set(orderId, {
+            id: `order-${orderId}`,
+            message,
+            type,
+            orderId,
+            createdAt: new Date(orderData.orderDetails.createdAt),
+            isOrderNotification: true
+          });
+        }
       });
 
-      // Update notifications - only keep order notifications
+      // Update notifications
       setNotifications(Array.from(currentOrders.values()));
-      
-      // Remove notifications for completed or cancelled orders
-      const completedOrdersQuery = query(
-        ordersRef,
-        where("orderDetails.status", "in", ["Completed", "Cancelled"])
-      );
-      
-      const completedMobileOrdersQuery = query(
-        ordersRef,
-        where("orderDetails.orderStatus", "in", ["Completed", "Cancelled"])
-      );
-      
-      const [completedSnapshot, completedMobileSnapshot] = await Promise.all([
-        getDocs(completedOrdersQuery),
-        getDocs(completedMobileOrdersQuery)
-      ]);
-      
-      const completedOrderIds = new Set([
-        ...completedSnapshot.docs.map(doc => doc.id),
-        ...completedMobileSnapshot.docs.map(doc => doc.id)
-      ]);
-      
-      setNotifications(prev => 
-        prev.filter(notification => 
-          notification.isOrderNotification && 
-          notification.orderId && 
-          !completedOrderIds.has(notification.orderId)
-        )
-      );
       
     } catch (error) {
       console.error("Error checking new orders:", error);
@@ -936,49 +915,84 @@ export default function Dashboard() {
   // Update the generateSalesReport function
   const generateSalesReport = async (period: 'daily' | 'weekly' | 'monthly') => {
     try {
-      const salesRef = collection(db, "orders");
       const now = new Date();
       let startDate: Date;
-      let endDate: Date = now;
+      let endDate: Date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+      let reportTitle = '';
 
       switch (period) {
         case 'daily':
-          startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          reportTitle = 'Daily Sales Report';
           break;
         case 'weekly':
-          startDate = new Date(now);
-          startDate.setDate(now.getDate() - 7);
+          // Get last Monday
+          const day = now.getDay();
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+          startDate = new Date(now.getFullYear(), now.getMonth(), diff, 0, 0, 0);
+          reportTitle = 'Weekly Sales Report (Monday to Sunday)';
           break;
         case 'monthly':
-          startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+          // Get first day of previous month
+          startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0);
+          endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+          reportTitle = `Monthly Sales Report (${startDate.toLocaleString('default', { month: 'long', year: 'numeric' })})`;
           break;
         default:
           startDate = now;
+          reportTitle = 'Sales Report';
       }
 
-      const salesQuery = query(
-        salesRef,
-        where("orderDetails.status", "==", "Completed"),
-        where("orderDetails.completedAt", ">=", startDate.toISOString()),
-        where("orderDetails.completedAt", "<=", endDate.toISOString())
-      );
+      // Get sales data from both collections
+      const [ordersSnapshot, salesSnapshot] = await Promise.all([
+        getDocs(query(
+          collection(db, "orders"),
+          where("orderDetails.status", "==", "Completed"),
+          where("orderDetails.completedAt", ">=", startDate.toISOString()),
+          where("orderDetails.completedAt", "<=", endDate.toISOString())
+        )),
+        getDocs(query(
+          collection(db, "sales"),
+          where("date", ">=", startDate),
+          where("date", "<=", endDate)
+        ))
+      ]);
 
-      const salesSnapshot = await getDocs(salesQuery);
-      const orders = salesSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as OrderData[];
+      // Process orders
+      const orders = ordersSnapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          amount: Number(data.orderDetails.totalAmount) || 0,
+          date: new Date(data.orderDetails.completedAt),
+          customerName: data.orderDetails.customerName || 'Walk-in Customer'
+        };
+      });
+
+      // Process direct sales
+      const sales = salesSnapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          amount: Number(data.amount) || 0,
+          date: data.date?.toDate() || new Date(data.date),
+          customerName: data.customerName || 'Direct Sale'
+        };
+      });
+
+      // Combine and sort all transactions
+      const allTransactions = [...orders, ...sales].sort((a, b) => a.date.getTime() - b.date.getTime());
 
       // Calculate totals
-      const totalSales = orders.reduce((sum, order) => sum + order.orderDetails.totalAmount, 0);
-      const totalOrders = orders.length;
+      const totalSales = allTransactions.reduce((sum, transaction) => sum + transaction.amount, 0);
+      const totalTransactions = allTransactions.length;
 
       // Create PDF document
       const doc = new jsPDF();
       
       // Add title
       doc.setFontSize(20);
-      doc.text(`${period.charAt(0).toUpperCase() + period.slice(1)} Sales Report`, 14, 20);
+      doc.text(reportTitle, 14, 20);
       
       // Add report period
       doc.setFontSize(12);
@@ -989,24 +1003,25 @@ export default function Dashboard() {
       doc.text('Summary', 14, 40);
       doc.setFontSize(12);
       doc.text(`Total Sales: ₱${totalSales.toLocaleString()}`, 14, 50);
-      doc.text(`Total Orders: ${totalOrders}`, 14, 60);
+      doc.text(`Total Transactions: ${totalTransactions}`, 14, 60);
       
-      // Add orders table
+      // Add transactions table
       doc.setFontSize(14);
-      doc.text('Order Details', 14, 80);
+      doc.text('Transaction Details', 14, 80);
       
       // Prepare table data
-      const tableData = orders.map(order => [
-        order.id.slice(0, 6),
-        order.orderDetails.customerName,
-        `₱${order.orderDetails.totalAmount.toLocaleString()}`,
-        new Date(order.orderDetails.completedAt).toLocaleDateString()
+      const tableData = allTransactions.map(transaction => [
+        transaction.id.slice(0, 6),
+        transaction.customerName,
+        `₱${transaction.amount.toLocaleString()}`,
+        transaction.date.toLocaleDateString(),
+        transaction.date.toLocaleTimeString()
       ]);
 
       // Add table using autoTable
       autoTable(doc, {
         startY: 90,
-        head: [['Order ID', 'Customer', 'Amount', 'Date']],
+        head: [['ID', 'Customer', 'Amount', 'Date', 'Time']],
         body: tableData,
         theme: 'grid',
         headStyles: {
@@ -1022,10 +1037,9 @@ export default function Dashboard() {
       // Save the PDF
       doc.save(`${period}-sales-report-${new Date().toISOString().split('T')[0]}.pdf`);
 
-      // Show success notification
       setNotifications(prev => [...prev, {
         id: `report-${Date.now()}`,
-        message: `${period.charAt(0).toUpperCase() + period.slice(1)} sales report generated successfully`,
+        message: `${reportTitle} generated successfully`,
         type: 'success',
         createdAt: new Date()
       }]);
@@ -1114,7 +1128,6 @@ export default function Dashboard() {
                 </span>
               </div>
               <p className="text-2xl font-semibold text-gray-900">₱{salesData.daily.toLocaleString()}</p>
-              <p className="text-xs text-gray-500 mt-1">Today's revenue</p>
               </div>
 
             <div 
@@ -1131,7 +1144,6 @@ export default function Dashboard() {
                 </span>
               </div>
               <p className="text-2xl font-semibold text-gray-900">₱{salesData.weekly.toLocaleString()}</p>
-              <p className="text-xs text-gray-500 mt-1">Last 7 days</p>
             </div>
 
             <div 
@@ -1150,7 +1162,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <p className="text-2xl font-semibold text-gray-900">₱{salesData.monthly.toLocaleString()}</p>
-              <p className="text-xs text-gray-500 mt-1">This month</p>
+              <p className="text-xs text-gray-500 mt-1">Last month</p>
             </div>
 
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
