@@ -907,7 +907,7 @@ export default function TrackingOrders() {
                           <div className="text-sm text-gray-900">
                             {order.userDetails
                               ? `${order.userDetails.firstName} ${order.userDetails.lastName}`.trim()
-                              : order.userId ? "Loading..." : "Walk-in Customer"}
+                              : "Walk-in Customer"}
                           </div>
                         </td>
                         <td className="px-6 py-4">
