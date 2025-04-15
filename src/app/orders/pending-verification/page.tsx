@@ -177,6 +177,8 @@ export default function PendingVerificationPage() {
 
     const q = query(
       ordersRef,
+      where("orderDetails.status", "==", "Pending Verification"),
+      where("orderDetails.paymentStatus", "==", "pending"),
       orderBy("orderDetails.createdAt", "desc")
     );
 
@@ -192,11 +194,6 @@ export default function PendingVerificationPage() {
               gcashReference: data.orderDetails?.gcashReference,
               gcashScreenshotUrl: data.orderDetails?.gcashScreenshotUrl
             });
-
-            // Skip orders that don't need verification
-            if (data.orderDetails?.paymentStatus !== "pending") {
-              return null;
-            }
 
             let userDetails = null;
             // Only fetch user details for non-walk-in orders
@@ -217,8 +214,8 @@ export default function PendingVerificationPage() {
               orderDetails: {
                 ...data.orderDetails,
                 paymentMethod: data.orderDetails?.paymentMethod || "Cash",
-                paymentStatus: "pending",
-                status: "Pending Verification",
+                paymentStatus: data.orderDetails?.paymentStatus || "pending",
+                status: data.orderDetails?.status || "Pending Verification",
                 totalAmount: data.orderDetails?.totalAmount || 0,
                 gcashReference: data.orderDetails?.gcashReference || "N/A",
                 gcashScreenshotUrl: data.orderDetails?.gcashScreenshotUrl || null,
@@ -232,10 +229,8 @@ export default function PendingVerificationPage() {
           })
         );
 
-        // Filter out null values (orders that don't need verification)
-        const filteredOrders = ordersList.filter(order => order !== null) as Order[];
-        console.log("Processed orders:", filteredOrders);
-        setOrders(filteredOrders);
+        console.log("Processed orders:", ordersList);
+        setOrders(ordersList);
         setIsLoading(false);
         setError(null);
       },

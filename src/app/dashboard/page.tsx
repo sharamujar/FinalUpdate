@@ -477,20 +477,45 @@ export default function Dashboard() {
       const orders = await Promise.all(snapshot.docs.map(async (docSnapshot) => {
         const data = docSnapshot.data();
         let customerName;
-        
-        // Check if it's a walk-in order
-        if (data.orderDetails.isWalkin) {
-          customerName = data.customerDetails?.name || "Walk-in Customer";
-        } else {
-          // For registered users
-          customerName = data.userDetails?.firstName && data.userDetails?.lastName
-            ? `${data.userDetails.firstName} ${data.userDetails.lastName}`
-            : "Walk-in Customer";
+
+        // For walk-in orders
+        if (data.orderType === "walk-in") {
+          customerName = data.customerName || data.customerDetails?.name || "Walk-in Customer";
+        } 
+        // For registered users
+        else {
+          if (data.userDetails?.firstName && data.userDetails?.lastName) {
+            customerName = `${data.userDetails.firstName} ${data.userDetails.lastName}`.trim();
+          } else if (data.customerDetails?.name) {
+            customerName = data.customerDetails.name;
+          } else if (data.orderDetails.customerName) {
+            customerName = data.orderDetails.customerName;
+          } else {
+            // Fetch user details from customers collection
+            try {
+              const userRef = doc(db, "customers", data.userId);
+              const userDoc = await getDoc(userRef);
+              if (userDoc.exists()) {
+                const userData = userDoc.data();
+                if (userData.name) {
+                  const nameParts = userData.name.split(" ");
+                  const firstName = nameParts[0];
+                  const lastName = nameParts.slice(1).join(" ") || "";
+                  customerName = `${firstName} ${lastName}`.trim();
+                } else {
+                  customerName = `${userData.firstName || ""} ${userData.lastName || ""}`.trim();
+                }
+              }
+            } catch (error) {
+              console.error("Error fetching customer details:", error);
+              customerName = "Unknown Customer";
+            }
+          }
         }
 
         return {
           id: docSnapshot.id,
-          customerName,
+          customerName: customerName || "Unknown Customer",
           total: data.orderDetails.totalAmount,
           status: data.orderDetails.status,
           date: new Date(data.orderDetails.createdAt)
@@ -773,13 +798,14 @@ export default function Dashboard() {
       const ordersRef = collection(db, "orders");
       const ordersQuery = query(
         ordersRef,
-        where("orderDetails.paymentStatus", "in", ["pending", "approved"]),
+        where("orderDetails.status", "==", "Pending Verification"),
+        where("orderDetails.paymentStatus", "==", "pending"),
         orderBy("orderDetails.createdAt", "desc")
       );
       
       const snapshot = await getDocs(ordersQuery);
       
-      // Create a map of current order statuses
+      // Create a map of current order notifications
       const currentOrders = new Map();
       
       snapshot.docs.forEach(doc => {
@@ -797,41 +823,25 @@ export default function Dashboard() {
             : orderData.customerName || "Customer";
         }
         
-        const paymentStatus = orderData.orderDetails?.paymentStatus;
-        const orderStatus = orderData.orderDetails?.status;
-        
-        // Create notification message based on order status
-        let message;
-        let type;
-        
-        if (paymentStatus === "pending") {
-          message = `New order needs verification - ${customerName}`;
-          type = "warning";
-        } else if (orderStatus === "Order Confirmed") {
-          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Confirmed)`;
-          type = "info";
-        } else if (orderStatus === "Preparing Order") {
-          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Preparing)`;
-          type = "info";
-        } else if (orderStatus === "Ready for Pickup") {
-          message = `Order #${orderId.slice(0, 6)} - ${customerName} (Ready)`;
-          type = "success";
-        }
-        
-        if (message) {
-          currentOrders.set(orderId, {
-            id: `order-${orderId}`,
-            message,
-            type,
-            orderId,
-            createdAt: new Date(orderData.orderDetails.createdAt),
-            isOrderNotification: true
-          });
-        }
+        // Create notification for pending verification orders
+        const message = `New order needs verification - ${customerName} (${orderData.orderDetails.paymentMethod})`;
+        currentOrders.set(orderId, {
+          id: `order-${orderId}`,
+          message,
+          type: "warning",
+          orderId,
+          createdAt: new Date(orderData.orderDetails.createdAt),
+          isOrderNotification: true
+        });
       });
 
       // Update notifications
-      setNotifications(Array.from(currentOrders.values()));
+      setNotifications(prev => {
+        // Keep non-order notifications
+        const otherNotifications = prev.filter(n => !n.isOrderNotification);
+        // Add new order notifications
+        return [...otherNotifications, ...Array.from(currentOrders.values())];
+      });
       
     } catch (error) {
       console.error("Error checking new orders:", error);
@@ -917,24 +927,29 @@ export default function Dashboard() {
     try {
       const now = new Date();
       let startDate: Date;
-      let endDate: Date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+      let endDate = new Date(now);
       let reportTitle = '';
+
+      // Set time to end of day for endDate
+      endDate.setHours(23, 59, 59, 999);
 
       switch (period) {
         case 'daily':
-          startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-          reportTitle = 'Daily Sales Report';
+          startDate = new Date(now);
+          startDate.setHours(0, 0, 0, 0);
+          reportTitle = `Daily Sales Report (${startDate.toLocaleDateString()})`;
           break;
         case 'weekly':
-          // Get last Monday
+          // Calculate last Monday (same as fetchSalesData)
           const day = now.getDay();
-          const diff = now.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
-          startDate = new Date(now.getFullYear(), now.getMonth(), diff, 0, 0, 0);
-          reportTitle = 'Weekly Sales Report (Monday to Sunday)';
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+          startDate = new Date(now);
+          startDate.setDate(diff);
+          startDate.setHours(0, 0, 0, 0);
+          reportTitle = `Weekly Sales Report (${startDate.toLocaleDateString()} - ${endDate.toLocaleDateString()})`;
           break;
         case 'monthly':
-          // Get first day of previous month
-          startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0);
+          startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
           endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
           reportTitle = `Monthly Sales Report (${startDate.toLocaleString('default', { month: 'long', year: 'numeric' })})`;
           break;
@@ -943,49 +958,44 @@ export default function Dashboard() {
           reportTitle = 'Sales Report';
       }
 
-      // Get sales data from both collections
-      const [ordersSnapshot, salesSnapshot] = await Promise.all([
-        getDocs(query(
-          collection(db, "orders"),
-          where("orderDetails.status", "==", "Completed"),
-          where("orderDetails.completedAt", ">=", startDate.toISOString()),
-          where("orderDetails.completedAt", "<=", endDate.toISOString())
-        )),
-        getDocs(query(
-          collection(db, "sales"),
-          where("date", ">=", startDate),
-          where("date", "<=", endDate)
-        ))
-      ]);
+      // Query completed orders with same logic as fetchSalesData
+      const ordersSnapshot = await getDocs(query(
+        collection(db, "orders"),
+        where("orderDetails.status", "==", "Completed"),
+        where("orderDetails.paymentStatus", "==", "approved"),
+        where("orderDetails.updatedAt", ">=", startDate.toISOString()),
+        where("orderDetails.updatedAt", "<=", endDate.toISOString())
+      ));
 
       // Process orders
       const orders = ordersSnapshot.docs.map(doc => {
         const data = doc.data();
+        let customerName = 'Walk-in Customer';
+
+        // Handle walk-in orders
+        if (data.orderType === 'walk-in' && data.customerName) {
+          customerName = data.customerName;
+        }
+        // Handle online orders with userDetails
+        else if (data.userDetails) {
+          customerName = `${data.userDetails.firstName} ${data.userDetails.lastName}`.trim();
+        }
+        // Handle online orders with customerDetails
+        else if (data.customerDetails?.name) {
+          customerName = data.customerDetails.name;
+        }
+
         return {
           id: doc.id,
           amount: Number(data.orderDetails.totalAmount) || 0,
-          date: new Date(data.orderDetails.completedAt),
-          customerName: data.orderDetails.customerName || 'Walk-in Customer'
+          date: new Date(data.orderDetails.updatedAt),
+          customerName
         };
-      });
-
-      // Process direct sales
-      const sales = salesSnapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          amount: Number(data.amount) || 0,
-          date: data.date?.toDate() || new Date(data.date),
-          customerName: data.customerName || 'Direct Sale'
-        };
-      });
-
-      // Combine and sort all transactions
-      const allTransactions = [...orders, ...sales].sort((a, b) => a.date.getTime() - b.date.getTime());
+      }).sort((a, b) => a.date.getTime() - b.date.getTime());
 
       // Calculate totals
-      const totalSales = allTransactions.reduce((sum, transaction) => sum + transaction.amount, 0);
-      const totalTransactions = allTransactions.length;
+      const totalSales = orders.reduce((sum, order) => sum + order.amount, 0);
+      const totalTransactions = orders.length;
 
       // Create PDF document
       const doc = new jsPDF();
@@ -1010,12 +1020,12 @@ export default function Dashboard() {
       doc.text('Transaction Details', 14, 80);
       
       // Prepare table data
-      const tableData = allTransactions.map(transaction => [
-        transaction.id.slice(0, 6),
-        transaction.customerName,
-        `₱${transaction.amount.toLocaleString()}`,
-        transaction.date.toLocaleDateString(),
-        transaction.date.toLocaleTimeString()
+      const tableData = orders.map(order => [
+        order.id.slice(0, 6),
+        order.customerName,
+        `₱${order.amount.toLocaleString()}`,
+        order.date.toLocaleDateString(),
+        order.date.toLocaleTimeString()
       ]);
 
       // Add table using autoTable
