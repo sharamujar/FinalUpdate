@@ -34,8 +34,8 @@ const Sidebar = () => {
 
   // Load orders dropdown state from localStorage on mount
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('ordersDropdownState');
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("ordersDropdownState");
       if (saved) {
         setIsOrdersOpen(JSON.parse(saved));
       }
@@ -44,8 +44,8 @@ const Sidebar = () => {
 
   // Save orders dropdown state to localStorage when it changes
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('ordersDropdownState', JSON.stringify(isOrdersOpen));
+    if (typeof window !== "undefined") {
+      localStorage.setItem("ordersDropdownState", JSON.stringify(isOrdersOpen));
     }
   }, [isOrdersOpen]);
 
@@ -207,7 +207,18 @@ const Sidebar = () => {
                     Products
                   </div>
                 </Link>
-                <Link href="/inventory/sizes">
+                <Link href="/inventory/price-management">
+                  <div
+                    role="button"
+                    className="flex items-center w-full p-3 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900"
+                  >
+                    <div className="grid mr-4 place-items-center">
+                      <PercentCircle className="w-5 h-5" />
+                    </div>
+                    Price Management
+                  </div>
+                </Link>
+                {/* <Link href="/inventory/sizes">
                   <div
                     role="button"
                     className="flex items-center w-full p-3 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900"
@@ -217,7 +228,7 @@ const Sidebar = () => {
                     </div>
                     Sizes
                   </div>
-                </Link>
+                </Link> */}
                 <Link href="/inventory/stock-management">
                   <div
                     role="button"
@@ -248,7 +259,9 @@ const Sidebar = () => {
           <div className="relative">
             <div
               role="button"
-              onClick={() => setIsContentManagementOpen(!isContentManagementOpen)} // Toggle dropdown
+              onClick={() =>
+                setIsContentManagementOpen(!isContentManagementOpen)
+              } // Toggle dropdown
               className="flex items-center w-full p-3 leading-tight transition-all rounded-lg outline-none text-start hover:bg-bg-light-brown hover:bg-opacity-80 hover:text-white focus:bg-blue-gray-50 focus:bg-opacity-80 focus:text-blue-gray-900 active:bg-blue-gray-50 active:bg-opacity-80 active:text-blue-gray-900"
             >
               <div className="grid mr-4 place-items-center">
@@ -318,7 +331,7 @@ const Sidebar = () => {
           </Link>
         </div>
       </nav>
-      
+
       {/* Logout Button */}
       <div className="p-4 mt-auto border-t border-gray-200">
         <div
